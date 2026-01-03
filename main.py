@@ -1,157 +1,189 @@
 import os
 import re
-from datetime import timedelta, datetime
+import logging
+from datetime import timedelta
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
-from telegram.ext import Application, ChatMemberHandler, CallbackQueryHandler, CommandHandler, ContextTypes, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions, ParseMode
+from telegram.ext import Updater, CallbackContext, ChatMemberHandler, CallbackQueryHandler, CommandHandler, Filters
 
-# 主人 ID
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# 你的 ID（後台命令只限你）
 OWNER_ID = 7807347685
 
-# 待驗證字典
+# 儲存待驗證用戶 {user_id: chat_id}
 pending_verifications = {}
 
-def has_spam_bio(bio: str) -> bool:
+# 儲存已知群組 {chat_id: title}
+known_groups = {}
+
+# 檢查 bio 是否可疑（v13.7 無法取 bio，先留著，未來升級再用）
+def has_spam_bio(bio):
     if not bio:
         return False
     return bool(re.search(r"@|\bhttps?://", bio, re.IGNORECASE))
 
-async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_member = update.chat_member
-    if not chat_member or chat_member.new_chat_member.status != "member":
+# 處理成員狀態變化（包括新加入）
+def handle_chat_member(update: Update, context: CallbackContext):
+    chat_member_update = update.chat_member or update.my_chat_member
+    if not chat_member_update:
         return
 
-    user = chat_member.new_chat_member.user
-    chat_id = chat_member.chat.id
+    old_status = chat_member_update.old_chat_member.status
+    new_status = chat_member_update.new_chat_member.status
+    user = chat_member_update.new_chat_member.user
+    chat_id = chat_member_update.chat.id
+    chat_title = chat_member_update.chat.title or "未知群組"
 
-    # 取得 bio
-    try:
-        member = await context.bot.get_chat_member(chat_id, user.id)
-        bio = member.user.bio or ""
-    except:
-        bio = ""
+    # 記錄群組
+    known_groups[chat_id] = chat_title
 
-    need_captcha = has_spam_bio(bio)
+    # 只處理加入（從非 member 變成 member）
+    if old_status in ["left", "kicked", "banned"] and new_status == "member":
+        # v13.7 無法取 bio，直接假設不需要驗證（或強制驗證可改這裡）
+        need_captcha = False  # 無法取 bio，暫時關閉檢查
 
-    if need_captcha:
-        await context.bot.restrict_chat_member(chat_id, user.id, permissions=ChatPermissions(can_send_messages=False))
+        welcome_text = f"歡迎 <a href='tg://user?id={user.id}'>{user.full_name}</a> 加入群組！"
 
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("👤 我是真人，驗證通過", callback_data=f"verify_{user.id}_{chat_id}")
-        ]])
+        if need_captcha:
+            # 禁言
+            context.bot.restrict_chat_member(
+                chat_id=chat_id,
+                user_id=user.id,
+                permissions=ChatPermissions(can_send_messages=False)
+            )
 
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"{user.mention_html()} 你的簡介含可疑連結，請5分鐘內點擊下方按鈕驗證。",
-            reply_markup=keyboard,
-            parse_mode="HTML"
-        )
+            # 發驗證按鈕
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("👤 我是真人，驗證通過", callback_data=f"verify_{user.id}_{chat_id}")
+            ]])
+            context.bot.send_message(
+                chat_id=chat_id,
+                text=f"<a href='tg://user?id={user.id}'>{user.full_name}</a> 請在5分鐘內點擊下方按鈕驗證你是真人。",
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML
+            )
 
-        context.job_queue.run_once(
-            kick_if_not_verified,
-            datetime.utcnow() + timedelta(minutes=5),
-            data={"user_id": user.id, "chat_id": chat_id}
-        )
-        pending_verifications[user.id] = chat_id
-    else:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"歡迎 {user.mention_html()} 加入群組！",
-            parse_mode="HTML"
-        )
+            # 5分鐘後踢出
+            context.job_queue.run_once(
+                kick_unverified,
+                when=timedelta(minutes=5),
+                context={"user_id": user.id, "chat_id": chat_id}
+            )
+            pending_verifications[user.id] = chat_id
+        else:
+            context.bot.send_message(chat_id=chat_id, text=welcome_text, parse_mode=ParseMode.HTML)
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# 按鈕點擊處理
+def button_click(update: Update, context: CallbackContext):
     query = update.callback_query
-    await query.answer()
+    query.answer()
 
     if not query.data.startswith("verify_"):
         return
 
-    _, uid, cid = query.data.split("_")
-    user_id, chat_id = int(uid), int(cid)
+    _, user_id_str, chat_id_str = query.data.split("_")
+    user_id = int(user_id_str)
+    chat_id = int(chat_id_str)
 
     if query.from_user.id != user_id:
-        await query.edit_message_text("這不是你的按鈕！")
+        query.edit_message_text(text="這不是你的驗證按鈕！")
         return
 
-    await context.bot.restrict_chat_member(chat_id, user_id, permissions=ChatPermissions(can_send_messages=True))
-
-    await query.edit_message_text(f"{query.from_user.mention_html()} 驗證通過！")
-
-    await context.bot.send_message(chat_id, f"歡迎 {query.from_user.mention_html()} 加入群組！", parse_mode="HTML")
-
-    pending_verifications.pop(user_id, None)
-
-async def kick_if_not_verified(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    user_id = job.data["user_id"]
-    chat_id = job.data["chat_id"]
-
-    await context.bot.ban_chat_member(chat_id, user_id)
-    await context.bot.unban_chat_member(chat_id, user_id)
-    await context.bot.send_message(chat_id, "未完成驗證，已自動移除。")
-    pending_verifications.pop(user_id, None)
-
-# ===== 後台命令 =====
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID or not update.effective_chat.type == "private":
-        return
-    await update.message.reply_text(
-        "/help - 顯示幫助\n"
-        "/list - 列出所有群組（帶編號）\n"
-        "/list user <編號> - 顯示該群組管理員\n"
-        "/ban <編號> <@username 或 ID> - 禁言\n"
-        "/endorsement <編號> <內容> - Bot代發言"
+    # 解除禁言
+    context.bot.restrict_chat_member(
+        chat_id=chat_id,
+        user_id=user_id,
+        permissions=ChatPermissions(can_send_messages=True, can_send_media_messages=True,
+                                    can_send_polls=True, can_send_other_messages=True,
+                                    can_add_web_page_previews=True)
     )
 
-async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query.edit_message_text(text=f"<a href='tg://user?id={user_id}'>{query.from_user.full_name}</a> 驗證通過！")
+
+    # 發歡迎
+    context.bot.send_message(
+        chat_id=chat_id,
+        text=f"歡迎 <a href='tg://user?id={user_id}'>{query.from_user.full_name}</a> 加入群組！",
+        parse_mode=ParseMode.HTML
+    )
+
+    pending_verifications.pop(user_id, None)
+
+# 未驗證自動踢出
+def kick_unverified(context: CallbackContext):
+    data = context.job.context
+    user_id = data["user_id"]
+    chat_id = data["chat_id"]
+
+    context.bot.kick_chat_member(chat_id=chat_id, user_id=user_id)
+    context.bot.unban_chat_member(chat_id=chat_id, user_id=user_id)  # 只 kick 不永久 ban
+    context.bot.send_message(chat_id=chat_id, text="未完成驗證，已自動移除。")
+    pending_verifications.pop(user_id, None)
+
+# ===== 後台命令（只限主人私訊） =====
+def help_cmd(update: Update, context: CallbackContext):
+    if update.effective_user.id != OWNER_ID or update.effective_chat.type != "private":
+        return
+    update.message.reply_text(
+        "/help - 顯示幫助\n"
+        "/list - 顯示所有群組（帶編號）\n"
+        "/endorsement <編號> <內容> - 以 Bot 名義發言\n"
+        "（/ban 和 /list user 因 v13.7 限制暫未實作，可未來升級）"
+    )
+
+def list_groups(update: Update, context: CallbackContext):
     if update.effective_user.id != OWNER_ID:
         return
-    chats = context.application.chat_data.keys()
-    if not chats:
-        await update.message.reply_text("目前沒有群組記錄")
+    if not known_groups:
+        update.message.reply_text("目前沒有記錄到群組")
         return
 
     text = "群組列表：\n"
-    for i, chat_id in enumerate(sorted([c for c in chats if isinstance(c, int)]), 1):
-        try:
-            chat = await context.bot.get_chat(chat_id)
-            title = chat.title or "未知"
-        except:
-            title = "無法取得"
+    sorted_groups = sorted(known_groups.items(), key=lambda x: x[0])
+    for i, (chat_id, title) in enumerate(sorted_groups, 1):
         text += f"{i}. {title} (ID: {chat_id})\n"
-    await update.message.reply_text(text)
+    update.message.reply_text(text)
 
-async def endorsement(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def endorsement(update: Update, context: CallbackContext):
     if update.effective_user.id != OWNER_ID or len(context.args) < 2:
         return
     try:
         idx = int(context.args[0]) - 1
         content = " ".join(context.args[1:])
-        chat_ids = sorted([c for c in context.application.chat_data.keys() if isinstance(c, int)])
+        chat_ids = sorted(known_groups.keys())
         chat_id = chat_ids[idx]
-        await context.bot.send_message(chat_id, content)
-        await update.message.reply_text("已代發言")
+        context.bot.send_message(chat_id=chat_id, text=content)
+        update.message.reply_text("已代發言")
     except:
-        await update.message.reply_text("失敗，檢查編號或內容")
+        update.message.reply_text("失敗，檢查編號")
 
 def main():
     token = os.getenv("BOT_TOKEN")
     if not token:
-        print("請設定 BOT_TOKEN 環境變數")
+        logger.error("請設定 BOT_TOKEN 環境變數")
         return
 
-    app = Application.builder().token(token).build()
+    updater = Updater(token=token, use_context=True)
 
-    app.add_handler(ChatMemberHandler(handle_new_member, chat_member_types=ChatMemberHandler.CHAT_MEMBER))
-    app.add_handler(CallbackQueryHandler(button_callback))
+    dp = updater.dispatcher
 
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("list", list_groups))
-    app.add_handler(CommandHandler("endorsement", endorsement))
+    # 捕捉成員變化
+    dp.add_handler(ChatMemberHandler(handle_chat_member, chat_member_types=ChatMemberHandler.ANY_CHAT_MEMBER))
+    dp.add_handler(ChatMemberHandler(handle_chat_member, chat_member_types=ChatMemberHandler.MY_CHAT_MEMBER))
 
-    print("Bot 已啟動！")
-    app.run_polling(drop_pending_updates=True)
+    # 按鈕
+    dp.add_handler(CallbackQueryHandler(button_click))
 
-if __name__ == "__main__":
+    # 後台命令（限私訊主人）
+    dp.add_handler(CommandHandler("help", help_cmd, filters=Filters.user(user_id=OWNER_ID) & Filters.chat_type.private))
+    dp.add_handler(CommandHandler("list", list_groups, filters=Filters.user(user_id=OWNER_ID)))
+    dp.add_handler(CommandHandler("endorsement", endorsement, filters=Filters.user(user_id=OWNER_ID)))
+
+    logger.info("Bot 啟動中...")
+    updater.start_polling(drop_pending_updates=True)
+    updater.idle()
+
+if __name__ == '__main__':
     main()
