@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 OWNER_ID = 7807347685
 
-BOT_VERSION = "v1.8.0（2026-01-05 更新）"
+BOT_VERSION = "v1.9.0（2026-01-05 更新）"
 
 pending_verifications = {}
 known_groups = {}
@@ -93,7 +93,7 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML"
             )
 
-            # 5分鐘後強制踢出
+            # 強制5分鐘後踢出
             asyncio.create_task(delayed_kick(context.bot, user.id, chat_id))
 
             pending_verifications[user.id] = chat_id
@@ -101,12 +101,12 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=chat_id, text=welcome_text, parse_mode="HTML")
 
 async def delayed_kick(bot, user_id, chat_id):
-    await asyncio.sleep(300)  # 5分鐘
+    await asyncio.sleep(300)
     try:
         await bot.kick_chat_member(chat_id=chat_id, user_id=user_id)
         await bot.send_message(chat_id=chat_id, text="未在5分鐘內驗證，已自動踢出群組。")
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"踢出失敗: {e}")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -159,8 +159,9 @@ async def delayed_unmute(bot, user_id, chat_id, name, minutes):
             )
         )
         await bot.send_message(chat_id=chat_id, text=f"🔊 {name} 的禁言時間已到，自動解除～", parse_mode="HTML")
-    except:
-        pass
+        logger.info(f"成功解除禁言: user {user_id} in chat {chat_id}")
+    except Exception as e:
+        logger.error(f"解除禁言失敗: {e}")
 
 # /banme
 async def ban_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -172,19 +173,24 @@ async def ban_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     minutes = 2
 
-    await context.bot.restrict_chat_member(
-        chat_id=chat_id,
-        user_id=user.id,
-        permissions=ChatPermissions(can_send_messages=False)
-    )
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id=chat_id,
+            user_id=user.id,
+            permissions=ChatPermissions(can_send_messages=False)
+        )
+        logger.info(f"成功禁言 {user.id} {minutes} 分鐘 (/banme)")
 
-    # 強制定時解除
-    asyncio.create_task(delayed_unmute(context.bot, user.id, chat_id, user.mention_html(), minutes))
+        # 啟動獨立解除任務
+        asyncio.create_task(delayed_unmute(context.bot, user.id, chat_id, user.mention_html(), minutes))
 
-    await update.message.reply_text(
-        f"{user.mention_html()} 你自己要求的喔～\n被禁言 {minutes} 分鐘，冷靜一下 😂\n時間到一定會自動解除",
-        parse_mode="HTML"
-    )
+        await update.message.reply_text(
+            f"{user.mention_html()} 你自己要求的喔～\n被禁言 {minutes} 分鐘，冷靜一下 😂\n時間到一定自動解除！",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"/banme 失敗: {e}")
+        await update.message.reply_text("禁言失敗（可能權限不足）")
 
 # /ban
 async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -214,6 +220,7 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_id=user_id,
             permissions=ChatPermissions(can_send_messages=False)
         )
+        logger.info(f"管理員禁言 {user_id} {minutes} 分鐘")
 
         try:
             member = await context.bot.get_chat_member(chat_id, user_id)
@@ -221,20 +228,21 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             user_mention = f"user_id {user_id}"
 
-        # 強制定時解除
+        # 啟動獨立解除任務
         asyncio.create_task(delayed_unmute(context.bot, user_id, chat_id, user_mention, minutes))
 
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"🔇 {user_mention} 被管理員禁言 {minutes} 分鐘（只能看不能說）\n時間到一定會自動解除",
+            text=f"🔇 {user_mention} 被管理員禁言 {minutes} 分鐘（只能看不能說）\n時間到一定自動解除",
             parse_mode="HTML"
         )
 
-        await update.message.reply_text(f"✅ 已禁言 {minutes} 分鐘，時間到一定自動解除")
+        await update.message.reply_text(f"✅ 已禁言 {minutes} 分鐘")
     except Exception as e:
+        logger.error(f"/ban 失敗: {e}")
         await update.message.reply_text(f"❌ 操作失敗：{str(e)}")
 
-# 其他指令保持不變
+# 其他指令（help, list, members, users, endorsement）
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID or update.effective_chat.type != "private":
         return
@@ -342,7 +350,7 @@ def main():
     app.add_handler(CommandHandler("ban", ban_user))
     app.add_handler(CommandHandler("endorsement", endorsement))
 
-    logger.info(f"🤖 帝ACG 群組管理 Bot {BOT_VERSION} 已啟動！（強制定時解除版）")
+    logger.info(f"🤖 帝ACG 群組管理 Bot {BOT_VERSION} 已啟動！")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
