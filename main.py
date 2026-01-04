@@ -9,35 +9,57 @@ from telegram.ext import Application, ChatMemberHandler, CallbackQueryHandler, C
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 你的 Telegram User ID
+# 你的 ID
 OWNER_ID = 7807347685
 
 pending_verifications = {}
 known_groups = {}
+# 儲存每個群組最近發言的成員（用於 /members）
+recent_members = {}  # {chat_id: {user_id: (full_name, username)}}
 
 def has_spam_bio(bio: str) -> bool:
     if not bio:
         return False
     return bool(re.search(r"@|\bhttps?://", bio, re.IGNORECASE))
 
-# 關鍵：任何群組訊息都記錄群組
+# 任何群組訊息都記錄群組 + 記錄發言者（供 /members 使用）
 async def track_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
-    if chat.type in ["group", "supergroup"]:
-        chat_id = chat.id
-        title = chat.title or "未知群組"
-        known_groups[chat_id] = title
+    if chat.type not in ["group", "supergroup"]:
+        return
 
-# 加強新成員偵測（處理延遲或漏觸發）
+    chat_id = chat.id
+    title = chat.title or "未知群組"
+    known_groups[chat_id] = title
+
+    # 記錄發言者（僅文字訊息，避免過多雜訊）
+    if update.effective_user and update.message and update.message.text:
+        user = update.effective_user
+        user_id = user.id
+        full_name = user.full_name
+        username = user.username or "無"
+        if chat_id not in recent_members:
+            recent_members[chat_id] = {}
+        recent_members[chat_id][user_id] = (full_name, username)
+
+# 加強新成員偵測（三管齊下，最大程度避免漏掉）
 async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 支援 chat_member 和 message.new_chat_members 兩種方式
     new_members = []
+
+    # 方式1：chat_member 更新
     if update.chat_member:
         cm = update.chat_member
         if cm.new_chat_member.status == "member" and cm.old_chat_member.status != "member":
             new_members.append(cm.new_chat_member.user)
         chat_id = cm.chat.id
+
+    # 方式2：message.new_chat_members
     elif update.message and update.message.new_chat_members:
+        new_members = update.message.new_chat_members
+        chat_id = update.message.chat.id
+
+    # 方式3：service message（如有人加入）
+    elif update.message and update.message.left_chat_member is None and update.message.new_chat_members:
         new_members = update.message.new_chat_members
         chat_id = update.message.chat.id
     else:
@@ -48,7 +70,6 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     known_groups[chat_id] = chat.title or "未知群組"
 
     for user in new_members:
-        # 取得 bio
         try:
             member = await context.bot.get_chat_member(chat_id, user.id)
             bio = getattr(member.user, "bio", "") or ""
@@ -135,11 +156,12 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID or update.effective_chat.type != "private":
         return
     await update.message.reply_text(
-        "🔧 後台管理指令（僅限主人私訊）\n\n"
-        "/help - 顯示說明\n"
-        "/list - 顯示所有群組（帶編號）\n"
-        "/users <編號> - 顯示該群組管理員名單\n"
-        "/ban <編號> <user_id> [分鐘] - 禁言用戶（預設60分鐘）\n"
+        "🔧 後台管理指令（2026最終版）\n\n"
+        "/help - 說明\n"
+        "/list - 顯示所有群組\n"
+        "/members <編號> - 顯示最近活躍成員（含ID，方便ban）\n"
+        "/users <編號> - 顯示管理員\n"
+        "/ban <編號> <user_id> [分鐘] - 禁言（預設60分鐘）\n"
         "/endorsement <編號> <內容> - Bot代發言"
     )
 
@@ -147,15 +169,37 @@ async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         return
     if not known_groups:
-        await update.message.reply_text("尚未記錄到群組（請在群組發訊息讓我發現）")
+        await update.message.reply_text("尚未記錄群組（請在群組發訊息）")
         return
-
     text = "📋 群組列表：\n\n"
     for i, (chat_id, title) in enumerate(sorted(known_groups.items(), key=lambda x: x[0]), 1):
         text += f"{i}. {title} (ID: {chat_id})\n"
     await update.message.reply_text(text)
 
-# 新指令：/users <編號> （解決原 /list user 衝突問題）
+# 新增：顯示最近活躍成員（解決不知道ID問題）
+async def list_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text("用法：/members <群組編號>")
+        return
+    try:
+        idx = int(args[0]) - 1
+        chat_ids = sorted(known_groups.keys())
+        chat_id = chat_ids[idx]
+        members = recent_members.get(chat_id, {})
+        if not members:
+            await update.message.reply_text("該群組尚未有成員發言，暫無記錄（讓大家聊幾句就有了）")
+            return
+        text = f"👥 群組「{known_groups[chat_id]}」最近活躍成員（最多50位）：\n\n"
+        for i, (user_id, (name, username)) in enumerate(list(members.items())[-50:], 1):
+            username_str = f"@{username}" if username != "無" else ""
+            text += f"{i}. {name} {username_str} (ID: {user_id})\n"
+        await update.message.reply_text(text)
+    except Exception as e:
+        await update.message.reply_text(f"❌ 錯誤：{str(e)}")
+
 async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         return
@@ -167,10 +211,8 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         idx = int(args[0]) - 1
         chat_ids = sorted(known_groups.keys())
         chat_id = chat_ids[idx]
-        chat = await context.bot.get_chat(chat_id)
-
         admins = await context.bot.get_chat_administrators(chat_id)
-        text = f"👥 群組「{chat.title}」管理員：\n\n"
+        text = f"👑 群組「{known_groups[chat_id]}」管理員：\n\n"
         for admin in admins:
             user = admin.user
             text += f"• {user.mention_html()} (ID: {user.id})\n"
@@ -178,13 +220,12 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ 錯誤：{str(e)}")
 
-# 加強版 ban：支援自訂分鐘數
 async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         return
     args = context.args
     if len(args) < 2:
-        await update.message.reply_text("用法：/ban <群組編號> <user_id> [分鐘數]\n不填時間預設60分鐘")
+        await update.message.reply_text("用法：/ban <編號> <user_id> [分鐘]\n用 /members 取得ID")
         return
     try:
         idx = int(args[0]) - 1
@@ -196,12 +237,17 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_ids = sorted(known_groups.keys())
         chat_id = chat_ids[idx]
 
+        bot_info = await context.bot.get_me()
+        if user_id == bot_info.id:
+            await update.message.reply_text("❌ 不能禁言 Bot 自己！")
+            return
+
         await context.bot.ban_chat_member(
             chat_id=chat_id,
             user_id=user_id,
             until_date=timedelta(minutes=minutes)
         )
-        await update.message.reply_text(f"✅ 已將 user_id {user_id} 禁言 {minutes} 分鐘")
+        await update.message.reply_text(f"✅ 已禁言 user_id {user_id} {minutes} 分鐘")
     except Exception as e:
         await update.message.reply_text(f"❌ 禁言失敗：{str(e)}")
 
@@ -230,10 +276,10 @@ def main():
 
     app = Application.builder().token(token).build()
 
-    # 自動記錄群組
+    # 自動記錄群組 + 成員
     app.add_handler(MessageHandler(filters.ChatType.GROUPS, track_group_message))
 
-    # 新成員處理（支援兩種更新類型）
+    # 新成員多重偵測
     app.add_handler(ChatMemberHandler(handle_new_member, chat_member_types=ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_member))
 
@@ -243,11 +289,12 @@ def main():
     # 指令
     app.add_handler(CommandHandler("help", help_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("list", list_groups))
-    app.add_handler(CommandHandler("users", list_users))  # 新獨立指令
+    app.add_handler(CommandHandler("members", list_members))
+    app.add_handler(CommandHandler("users", list_users))
     app.add_handler(CommandHandler("ban", ban_user))
     app.add_handler(CommandHandler("endorsement", endorsement))
 
-    logger.info("🤖 群組管理 Bot 已啟動（2026強化版）")
+    logger.info("🤖 帝ACG 群組管理 Bot 最終版已啟動！")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
