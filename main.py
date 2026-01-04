@@ -1,8 +1,8 @@
 import os
 import re
+import asyncio
 from datetime import timedelta
 import logging
-import asyncio
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.ext import Application, ChatMemberHandler, CallbackQueryHandler, CommandHandler, MessageHandler, ContextTypes, filters
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 OWNER_ID = 7807347685
 
-BOT_VERSION = "v1.7.0（2026-01-05 更新）"
+BOT_VERSION = "v1.8.0（2026-01-05 更新）"
 
 pending_verifications = {}
 known_groups = {}
@@ -93,21 +93,13 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML"
             )
 
-            # 5分鐘後踢出（使用 job_queue 或 fallback）
-            if context.job_queue:
-                context.job_queue.run_once(
-                    kick_unverified,
-                    timedelta(minutes=5),
-                    data={"user_id": user.id, "chat_id": chat_id}
-                )
-            else:
-                asyncio.create_task(delayed_kick(context.bot, user.id, chat_id))
+            # 5分鐘後強制踢出
+            asyncio.create_task(delayed_kick(context.bot, user.id, chat_id))
 
             pending_verifications[user.id] = chat_id
         else:
             await context.bot.send_message(chat_id=chat_id, text=welcome_text, parse_mode="HTML")
 
-# fallback 踢出
 async def delayed_kick(bot, user_id, chat_id):
     await asyncio.sleep(300)  # 5分鐘
     try:
@@ -151,51 +143,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     pending_verifications.pop(user_id, None)
 
-async def kick_unverified(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    user_id = job.data["user_id"]
-    chat_id = job.data["chat_id"]
-
-    await context.bot.kick_chat_member(chat_id=chat_id, user_id=user_id)
-    await context.bot.send_message(chat_id=chat_id, text="未在5分鐘內驗證，已自動踢出群組。")
-    pending_verifications.pop(user_id, None)
-
-# 定時解除禁言（雙重保險 + fallback）
-async def unmute_user(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    user_id = job.data["user_id"]
-    chat_id = job.data["chat_id"]
-    name = job.data.get("name", "某人")
-
-    await context.bot.restrict_chat_member(
-        chat_id=chat_id,
-        user_id=user_id,
-        permissions=ChatPermissions(
-            can_send_messages=True,
-            can_send_media_messages=True,
-            can_send_polls=True,
-            can_send_other_messages=True,
-            can_add_web_page_previews=True
+# 強制定時解除禁言（最穩方式）
+async def delayed_unmute(bot, user_id, chat_id, name, minutes):
+    await asyncio.sleep(minutes * 60)
+    try:
+        await bot.restrict_chat_member(
+            chat_id=chat_id,
+            user_id=user_id,
+            permissions=ChatPermissions(
+                can_send_messages=True,
+                can_send_media_messages=True,
+                can_send_polls=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True
+            )
         )
-    )
-
-    await context.bot.send_message(chat_id=chat_id, text=f"🔊 {name} 的禁言時間已到，自動解除～", parse_mode="HTML")
-
-# fallback 解除禁言
-async def delayed_unmute(bot, user_id, chat_id, name):
-    await asyncio.sleep(120)  # 預設2分鐘或其他
-    await bot.restrict_chat_member(
-        chat_id=chat_id,
-        user_id=user_id,
-        permissions=ChatPermissions(
-            can_send_messages=True,
-            can_send_media_messages=True,
-            can_send_polls=True,
-            can_send_other_messages=True,
-            can_add_web_page_previews=True
-        )
-    )
-    await bot.send_message(chat_id=chat_id, text=f"🔊 {name} 的禁言時間已到，自動解除～", parse_mode="HTML")
+        await bot.send_message(chat_id=chat_id, text=f"🔊 {name} 的禁言時間已到，自動解除～", parse_mode="HTML")
+    except:
+        pass
 
 # /banme
 async def ban_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -213,18 +178,11 @@ async def ban_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
         permissions=ChatPermissions(can_send_messages=False)
     )
 
-    # 定時解除（優先用 job_queue，fallback 用 asyncio）
-    if context.job_queue:
-        context.job_queue.run_once(
-            unmute_user,
-            timedelta(minutes=minutes),
-            data={"user_id": user.id, "chat_id": chat_id, "name": user.mention_html()}
-        )
-    else:
-        asyncio.create_task(delayed_unmute(context.bot, user.id, chat_id, user.mention_html()))
+    # 強制定時解除
+    asyncio.create_task(delayed_unmute(context.bot, user.id, chat_id, user.mention_html(), minutes))
 
     await update.message.reply_text(
-        f"{user.mention_html()} 你自己要求的喔～\n被禁言 {minutes} 分鐘，冷靜一下 😂\n時間到會自動解除",
+        f"{user.mention_html()} 你自己要求的喔～\n被禁言 {minutes} 分鐘，冷靜一下 😂\n時間到一定會自動解除",
         parse_mode="HTML"
     )
 
@@ -263,26 +221,20 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             user_mention = f"user_id {user_id}"
 
-        if context.job_queue:
-            context.job_queue.run_once(
-                unmute_user,
-                timedelta(minutes=minutes),
-                data={"user_id": user_id, "chat_id": chat_id, "name": user_mention}
-            )
-        else:
-            asyncio.create_task(delayed_unmute(context.bot, user_id, chat_id, user_mention))
+        # 強制定時解除
+        asyncio.create_task(delayed_unmute(context.bot, user_id, chat_id, user_mention, minutes))
 
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"🔇 {user_mention} 被管理員禁言 {minutes} 分鐘（只能看不能說）\n時間到會自動解除",
+            text=f"🔇 {user_mention} 被管理員禁言 {minutes} 分鐘（只能看不能說）\n時間到一定會自動解除",
             parse_mode="HTML"
         )
 
-        await update.message.reply_text(f"✅ 已禁言 {minutes} 分鐘，並安排自動解除")
+        await update.message.reply_text(f"✅ 已禁言 {minutes} 分鐘，時間到一定自動解除")
     except Exception as e:
         await update.message.reply_text(f"❌ 操作失敗：{str(e)}")
 
-# 其他指令（help, list, members, users, endorsement）保持不變
+# 其他指令保持不變
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID or update.effective_chat.type != "private":
         return
@@ -390,7 +342,7 @@ def main():
     app.add_handler(CommandHandler("ban", ban_user))
     app.add_handler(CommandHandler("endorsement", endorsement))
 
-    logger.info(f"🤖 帝ACG 群組管理 Bot {BOT_VERSION} 已啟動！")
+    logger.info(f"🤖 帝ACG 群組管理 Bot {BOT_VERSION} 已啟動！（強制定時解除版）")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
