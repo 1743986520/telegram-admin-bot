@@ -12,8 +12,8 @@ logger = logging.getLogger(__name__)
 # 你的 Telegram User ID
 OWNER_ID = 7807347685
 
-# 版本號（請勿修改，更新時我會幫你改）
-BOT_VERSION = "v1.3.0（2026-01-04 更新）"
+# 版本號
+BOT_VERSION = "v1.4.0（2026-01-04 更新）"
 
 pending_verifications = {}
 known_groups = {}
@@ -24,7 +24,7 @@ def has_spam_bio(bio: str) -> bool:
         return False
     return bool(re.search(r"@|\bhttps?://", bio, re.IGNORECASE))
 
-# 任何群組訊息都記錄群組 + 活躍成員
+# 記錄群組 + 活躍成員
 async def track_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in ["group", "supergroup"]:
@@ -43,7 +43,7 @@ async def track_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             recent_members[chat_id] = {}
         recent_members[chat_id][user_id] = (full_name, username)
 
-# 加強新成員偵測（最大程度避免漏掉）
+# 新成員偵測（已加強）
 async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_members = []
     chat_id = None
@@ -62,7 +62,6 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not chat_id or not new_members:
         return
 
-    # 記錄群組
     try:
         chat = await context.bot.get_chat(chat_id)
         known_groups[chat_id] = chat.title or "未知群組"
@@ -80,7 +79,6 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         welcome_text = f"歡迎 {user.mention_html()} 加入群組！"
 
         if need_captcha:
-            # 禁言
             await context.bot.restrict_chat_member(
                 chat_id=chat_id,
                 user_id=user.id,
@@ -107,7 +105,6 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await context.bot.send_message(chat_id=chat_id, text=welcome_text, parse_mode="HTML")
 
-# 驗證按鈕
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -143,7 +140,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     pending_verifications.pop(user_id, None)
 
-# 驗證失敗：只踢出（不會進黑名單）
+# 驗證失敗只踢出
 async def kick_unverified(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     user_id = job.data["user_id"]
@@ -151,11 +148,31 @@ async def kick_unverified(context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await context.bot.kick_chat_member(chat_id=chat_id, user_id=user_id)
-        # 不需要 unban，因為 kick_chat_member 預設就是只移除不封鎖
         await context.bot.send_message(chat_id=chat_id, text="未在5分鐘內驗證，已自動踢出群組。")
     except:
         pass
     pending_verifications.pop(user_id, None)
+
+# 新增：好玩的 /banme （群組內任何人可用）
+async def ban_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("這個指令只能在群組使用喔～")
+        return
+
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+
+    await context.bot.restrict_chat_member(
+        chat_id=chat_id,
+        user_id=user.id,
+        until_date=timedelta(minutes=2),
+        permissions=ChatPermissions(can_send_messages=False)
+    )
+
+    await update.message.reply_text(
+        f"{user.mention_html()} 你自己要求的喔～\n被禁言 2 分鐘，冷靜一下 😂",
+        parse_mode="HTML"
+    )
 
 # ===== 後台指令 =====
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -167,8 +184,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/list - 顯示所有群組\n"
         "/members <編號> - 顯示最近活躍成員（含ID）\n"
         "/users <編號> - 顯示管理員\n"
-        "/ban <編號> <user_id> [分鐘] - 禁言（預設60分鐘）\n"
-        "/endorsement <編號> <內容> - Bot代發言"
+        "/ban <編號> <user_id> [分鐘] - 禁言（預設60分鐘，時間到自動解除）\n"
+        "/endorsement <編號> <內容> - Bot代發言\n\n"
+        "群組內公開指令：/banme - 自己禁言2分鐘（好玩用）"
     )
 
 async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -225,7 +243,7 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"錯誤：{str(e)}")
 
-# 真正禁言（mute），不會踢出
+# 禁言 + 公開宣布 + 時間到自動解除
 async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         return
@@ -248,14 +266,28 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ 不能禁言 Bot 自己！")
             return
 
-        # 真正禁言：只能閱讀，不能發言
+        # 執行禁言（時間到自動解除）
         await context.bot.restrict_chat_member(
             chat_id=chat_id,
             user_id=user_id,
             until_date=timedelta(minutes=minutes),
             permissions=ChatPermissions(can_send_messages=False)
         )
-        await update.message.reply_text(f"✅ 已禁言 user_id {user_id} {minutes} 分鐘（只能看不能說）")
+
+        # 在群組公開宣布
+        try:
+            user = await context.bot.get_chat_member(chat_id, user_id)
+            user_mention = user.user.mention_html()
+        except:
+            user_mention = f"user_id {user_id}"
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"🔇 {user_mention} 被管理員禁言 {minutes} 分鐘（只能看不能說）",
+            parse_mode="HTML"
+        )
+
+        await update.message.reply_text(f"✅ 已禁言並在群組宣布（{minutes} 分鐘後自動解除）")
     except Exception as e:
         await update.message.reply_text(f"❌ 禁言失敗：{str(e)}")
 
@@ -289,6 +321,10 @@ def main():
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_member))
     app.add_handler(CallbackQueryHandler(button_callback))
 
+    # 群組公開指令（所有人可用）
+    app.add_handler(CommandHandler("banme", ban_me, filters=filters.ChatType.GROUPS))
+
+    # 後台指令
     app.add_handler(CommandHandler("help", help_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("list", list_groups))
     app.add_handler(CommandHandler("members", list_members))
