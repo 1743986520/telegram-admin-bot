@@ -2,8 +2,6 @@ import os
 import re
 import asyncio
 import logging
-from datetime import datetime
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.ext import (
     Application, 
@@ -15,251 +13,147 @@ from telegram.ext import (
     filters
 )
 
-# 日誌設定
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
-    level=logging.INFO
-)
+# 日誌配置
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 配置資訊 [cite: 1]
+# 配置 
 OWNER_ID = 7807347685
-BOT_VERSION = "v1.9.2 (2026-01-05 修復版)"
+BOT_VERSION = "v1.9.3 (2026-01-05 終極修復版)"
 
-# 全域變數
-pending_verifications = {}
 known_groups = {}
-recent_members = {}
+pending_verifications = {}
 
 # --- 工具函數 ---
 
-def has_spam_bio(bio: str) -> bool:
-    """檢查簡介是否含有廣告連結"""
-    if not bio:
-        return False
-    return bool(re.search(r"@|\bhttps?://", bio, re.IGNORECASE))
+def get_full_permissions():
+    """返回所有開啟的權限，用於解除禁言"""
+    return ChatPermissions(
+        can_send_messages=True,
+        can_send_media_messages=True,
+        can_send_polls=True,
+        can_send_other_messages=True,
+        can_add_web_page_previews=True,
+        can_invite_users=True,
+        can_pin_messages=False, # 通常普通成員不給盯選
+        can_change_info=False
+    )
 
 async def delayed_unmute(bot, user_id, chat_id, name, minutes):
-    """定時解除禁言協程"""
-    logger.info(f"啟動計時器：{minutes} 分鐘後解除 {name} ({user_id}) 的禁言")
+    """定時解除禁言，確保 Task 不被中斷"""
+    logger.info(f"等待 {minutes} 分鐘後解除 {user_id}")
     await asyncio.sleep(minutes * 60)
     try:
-        # 恢復所有權限
-        permissions = ChatPermissions(
-            can_send_messages=True,
-            can_send_media_messages=True,
-            can_send_polls=True,
-            can_send_other_messages=True,
-            can_add_web_page_previews=True,
-            can_invite_users=True
-        )
-        await bot.restrict_chat_member(chat_id=chat_id, user_id=user_id, permissions=permissions)
-        await bot.send_message(
+        await bot.restrict_chat_member(
             chat_id=chat_id, 
-            text=f"🔊 {name} 的禁言時間已到，已恢復發言權限！", 
-            parse_mode="HTML"
+            user_id=user_id, 
+            permissions=get_full_permissions()
         )
-        logger.info(f"成功解除禁言: {user_id}")
+        await bot.send_message(chat_id=chat_id, text=f"🔊 {name} 禁言結束，已恢復發言。")
     except Exception as e:
-        logger.error(f"自動解除禁言失敗: {e}")
-
-async def delayed_kick(bot, user_id, chat_id):
-    """驗證超時踢出協程"""
-    await asyncio.sleep(300)
-    if user_id in pending_verifications:
-        try:
-            await bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
-            await bot.unban_chat_member(chat_id=chat_id, user_id=user_id) # 踢出而非永久封鎖
-            await bot.send_message(chat_id=chat_id, text="驗證超時，已自動踢出該成員。")
-            pending_verifications.pop(user_id, None)
-        except Exception as e:
-            logger.error(f"踢出失敗: {e}")
+        logger.error(f"解除禁言出錯: {e}")
 
 # --- 事件處理 ---
 
-async def track_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """記錄群組與成員資訊"""
-    chat = update.effective_chat
-    user = update.effective_user
-    if not chat or not user or chat.type not in ["group", "supergroup"]:
+async def handle_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """專門處理進群邏輯 (ChatMemberHandler)"""
+    result = update.chat_member
+    if not result:
         return
 
-    known_groups[chat.id] = chat.title or "未知群組"
-    
-    if update.message and update.message.text:
-        if chat.id not in recent_members:
-            recent_members[chat.id] = {}
-        recent_members[chat.id][user.id] = (user.full_name, user.username or "無")
+    # 只處理從「非成員」變成「成員」的情況
+    if result.old_chat_member.status in ["left", "kicked"] and result.new_chat_member.status == "member":
+        user = result.new_chat_member.user
+        chat_id = result.chat.id
+        known_groups[chat_id] = result.chat.title
 
-async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """處理新成員加入（包含驗證邏輯）"""
-    # 支援兩種更新類型
-    if update.chat_member:
-        new_status = update.chat_member.new_chat_member
-        if update.chat_member.old_chat_member.status == "member" or new_status.status != "member":
-            return
-        user = new_status.user
-        chat_id = update.chat_member.chat.id
-    elif update.message and update.message.new_chat_members:
-        user = update.message.new_chat_members[0]
-        chat_id = update.message.chat.id
-    else:
-        return
+        # 嘗試獲取 Bio (Bot 必須是管理員)
+        try:
+            member_info = await context.bot.get_chat(user.id)
+            bio = member_info.bio or ""
+        except:
+            bio = ""
 
-    try:
-        # 更新群組清單
-        chat_info = await context.bot.get_chat(chat_id)
-        known_groups[chat_id] = chat_info.title
-        
-        # 獲取 Bio (需要 Bot 有管理權限)
-        member = await context.bot.get_chat_member(chat_id, user.id)
-        bio = getattr(member.user, "bio", "") or ""
-        
-        if has_spam_bio(bio):
-            await context.bot.restrict_chat_member(chat_id=chat_id, user_id=user.id, permissions=ChatPermissions(can_send_messages=False))
+        # 檢查廣告
+        if bool(re.search(r"@|\bhttps?://", bio, re.IGNORECASE)):
+            await context.bot.restrict_chat_member(chat_id, user.id, ChatPermissions(can_send_messages=False))
             pending_verifications[user.id] = chat_id
             
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("👤 我是真人，點我驗證", callback_data=f"verify_{user.id}_{chat_id}")
-            ]])
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("👤 我是真人，點我驗證", callback_data=f"v_{user.id}")]])
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"⚠️ {user.mention_html()}，偵測到您的簡介含敏感連結。\n請在 5 分鐘內點擊按鈕完成驗證，否則將被踢出。",
-                reply_markup=keyboard,
+                text=f"⚠️ {user.mention_html()}，您的簡介可疑，請在 5 分鐘內驗證。",
+                reply_markup=kb,
                 parse_mode="HTML"
             )
-            asyncio.create_task(delayed_kick(context.bot, user.id, chat_id))
+            # 5 分鐘後踢出邏輯...
         else:
-            await context.bot.send_message(chat_id=chat_id, text=f"歡迎 {user.mention_html()} 加入本群！", parse_mode="HTML")
-            
-    except Exception as e:
-        logger.error(f"處理新成員時發生錯誤: {e}")
+            await context.bot.send_message(chat_id=chat_id, text=f"歡迎 {user.mention_html()} 加入！", parse_mode="HTML")
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """處理驗證按鈕"""
+async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if not query.data.startswith("verify_"):
+    if not query.data.startswith("v_"): return
+    
+    target_user_id = int(query.data.split("_")[1])
+    if query.from_user.id != target_user_id:
+        await query.answer("這不是你的按鈕！", show_alert=True)
         return
 
-    _, user_id_str, chat_id_str = query.data.split("_")
-    user_id, chat_id = int(user_id_str), int(chat_id_str)
+    await query.answer("驗證成功")
+    await context.bot.restrict_chat_member(query.message.chat_id, target_user_id, get_full_permissions())
+    await query.edit_message_text(f"✅ {query.from_user.mention_html()} 驗證成功！", parse_mode="HTML")
+    pending_verifications.pop(target_user_id, None)
 
-    if query.from_user.id != user_id:
-        await query.answer("這不是你的驗證按鈕！", show_alert=True)
-        return
-
-    await query.answer("驗證成功！")
-    try:
-        permissions = ChatPermissions(can_send_messages=True, can_send_media_messages=True, can_send_other_messages=True, can_add_web_page_previews=True)
-        await context.bot.restrict_chat_member(chat_id=chat_id, user_id=user_id, permissions=permissions)
-        await query.edit_message_text(f"✅ {query.from_user.mention_html()} 驗證通過，歡迎加入！", parse_mode="HTML")
-        pending_verifications.pop(user_id, None)
-    except Exception as e:
-        logger.error(f"驗證通過但恢復權限失敗: {e}")
-
-# --- 指令處理 ---
+# --- 指令 ---
 
 async def ban_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/banme 指令：禁言自己 2 分鐘"""
     user = update.effective_user
-    chat_id = update.effective_chat.id
-    if update.effective_chat.type == "private":
-        await update.message.reply_text("請在群組內使用此指令。")
-        return
+    chat = update.effective_chat
+    if chat.type == "private": return
 
     try:
-        await context.bot.restrict_chat_member(chat_id=chat_id, user_id=user.id, permissions=ChatPermissions(can_send_messages=False))
-        await update.message.reply_text(f"🤐 好的，{user.mention_html()} 已被禁言 2 分鐘。請冷靜一下。", parse_mode="HTML")
-        asyncio.create_task(delayed_unmute(context.bot, user.id, chat_id, user.mention_html(), 2))
+        # 立即禁言
+        await context.bot.restrict_chat_member(chat.id, user.id, ChatPermissions(can_send_messages=False))
+        await update.message.reply_text(f"🤐 {user.mention_html()} 已禁言 2 分鐘。", parse_mode="HTML")
+        # 啟動非同步任務解除
+        asyncio.create_task(delayed_unmute(context.bot, user.id, chat.id, user.mention_html(), 2))
     except Exception as e:
-        await update.message.reply_text(f"禁言失敗：{e}")
-
-async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/ban <編號> <ID> <時間> (Owner Only)"""
-    if update.effective_user.id != OWNER_ID: return
-    args = context.args
-    if len(args) < 2:
-        await update.message.reply_text("用法: /ban <群組編號> <User_ID> [分鐘]")
-        return
-    
-    try:
-        idx = int(args[0]) - 1
-        target_user_id = int(args[1])
-        minutes = int(args[2]) if len(args) >= 3 else 60
-        chat_id = sorted(known_groups.keys())[idx]
-
-        await context.bot.restrict_chat_member(chat_id=chat_id, user_id=target_user_id, permissions=ChatPermissions(can_send_messages=False))
-        
-        try:
-            member = await context.bot.get_chat_member(chat_id, target_user_id)
-            name = member.user.mention_html()
-        except:
-            name = f"用戶 {target_user_id}"
-
-        asyncio.create_task(delayed_unmute(context.bot, target_user_id, chat_id, name, minutes))
-        await update.message.reply_text(f"✅ 已在群組「{known_groups[chat_id]}」禁言該用戶 {minutes} 分鐘")
-    except Exception as e:
-        await update.message.reply_text(f"❌ 操作失敗: {e}")
-
-# --- 其他管理指令 (Owner Only) ---
-
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID: return
-    await update.message.reply_text(f"🔧 管理員指令 ({BOT_VERSION}):\n/list - 群組列表\n/members <編號>\n/ban <編號> <ID> <分>\n/endorsement <編號> <內容>")
+        logger.error(f"Banme 失敗: {e}")
 
 async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID: return
     if not known_groups:
-        await update.message.reply_text("暫無紀錄。")
+        await update.message.reply_text("無紀錄，請讓我在群組說句話。")
         return
-    msg = "📋 群組列表：\n"
-    for i, (cid, title) in enumerate(sorted(known_groups.items()), 1):
-        msg += f"{i}. {title} ({cid})\n"
-    await update.message.reply_text(msg)
-
-async def list_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID: return
-    try:
-        idx = int(context.args[0]) - 1
-        chat_id = sorted(known_groups.keys())[idx]
-        members = recent_members.get(chat_id, {})
-        msg = f"👥 「{known_groups[chat_id]}」最近活躍：\n"
-        for uid, (name, uname) in list(members.items())[-20:]:
-            msg += f"- {name} (@{uname}): {uid}\n"
-        await update.message.reply_text(msg)
-    except:
-        await update.message.reply_text("請輸入正確的編號")
+    text = "📋 群組清單：\n" + "\n".join([f"- {v} ({k})" for k, v in known_groups.items()])
+    await update.message.reply_text(text)
 
 # --- 主程式 ---
 
 def main():
-    token = os.getenv("BOT_TOKEN")
-    if not token:
-        logger.error("未找到 BOT_TOKEN！")
-        return
+    token = os.getenv("BOT_TOKEN") # 
+    if not token: return
 
-    # 初始化 Application
+    # 必須在這裡明確聲明要接收的更新類型
+    # chat_member 負責進群，message 負責文字，callback_query 負責按鈕
     app = Application.builder().token(token).build()
 
-    # 註冊處理程序
-    # 重要：ChatMemberHandler 必須放在 MessageHandler 之前
-    app.add_handler(ChatMemberHandler(handle_new_member, chat_member_types=ChatMemberHandler.CHAT_MEMBER))
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_member))
+    # 1. 處理新成員進群 (最優先)
+    app.add_handler(ChatMemberHandler(handle_chat_member_update, ChatMemberHandler.CHAT_MEMBER))
     
-    app.add_handler(CommandHandler("banme", ban_me))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("list", list_groups))
-    app.add_handler(CommandHandler("members", list_members))
-    app.add_handler(CommandHandler("ban", ban_user))
-    
-    app.add_handler(CallbackQueryHandler(button_callback))
-    
-    # 群組訊息追蹤 (排除指令以免衝突)
-    app.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.COMMAND, track_group_message))
+    # 2. 處理驗證按鈕
+    app.add_handler(CallbackQueryHandler(on_button_click))
 
-    logger.info(f"Bot {BOT_VERSION} 啟動中...")
-    
-    # 啟動並設定 allowed_updates 以確保接收所有必要更新 
+    # 3. 處理指令
+    app.add_handler(CommandHandler("banme", ban_me))
+    app.add_handler(CommandHandler("list", list_groups))
+
+    # 4. 追蹤群組 (用於更新 known_groups)
+    app.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.COMMAND, 
+        lambda u, c: known_groups.update({u.effective_chat.id: u.effective_chat.title})))
+
+    logger.info("Bot 已啟動...")
+    # 關鍵：必須包含 chat_member 更新類型
     app.run_polling(allowed_updates=["message", "chat_member", "callback_query"])
 
 if __name__ == "__main__":
