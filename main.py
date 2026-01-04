@@ -13,11 +13,13 @@ logger = logging.getLogger(__name__)
 OWNER_ID = 7807347685
 
 # 版本號
-BOT_VERSION = "v1.4.0（2026-01-04 更新）"
+BOT_VERSION = "v1.6.0（2026-01-05 更新）"
 
+# 全域儲存
 pending_verifications = {}
 known_groups = {}
 recent_members = {}  # {chat_id: {user_id: (full_name, username)}}
+mute_jobs = {}       # {f"{user_id}_{chat_id}": job} 儲存禁言定時任務
 
 def has_spam_bio(bio: str) -> bool:
     if not bio:
@@ -43,7 +45,7 @@ async def track_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             recent_members[chat_id] = {}
         recent_members[chat_id][user_id] = (full_name, username)
 
-# 新成員偵測（已加強）
+# 新成員偵測
 async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_members = []
     chat_id = None
@@ -105,6 +107,7 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await context.bot.send_message(chat_id=chat_id, text=welcome_text, parse_mode="HTML")
 
+# 驗證按鈕
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -140,20 +143,40 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     pending_verifications.pop(user_id, None)
 
-# 驗證失敗只踢出
+# 驗證失敗踢出
 async def kick_unverified(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     user_id = job.data["user_id"]
     chat_id = job.data["chat_id"]
 
-    try:
-        await context.bot.kick_chat_member(chat_id=chat_id, user_id=user_id)
-        await context.bot.send_message(chat_id=chat_id, text="未在5分鐘內驗證，已自動踢出群組。")
-    except:
-        pass
+    await context.bot.kick_chat_member(chat_id=chat_id, user_id=user_id)
+    await context.bot.send_message(chat_id=chat_id, text="未在5分鐘內驗證，已自動踢出群組。")
     pending_verifications.pop(user_id, None)
 
-# 新增：好玩的 /banme （群組內任何人可用）
+# 定時解除禁言（雙重保險）
+async def unmute_user(context: ContextTypes.DEFAULT_TYPE):
+    job = context.job
+    user_id = job.data["user_id"]
+    chat_id = job.data["chat_id"]
+    name = job.data.get("name", "某人")
+
+    await context.bot.restrict_chat_member(
+        chat_id=chat_id,
+        user_id=user_id,
+        permissions=ChatPermissions(
+            can_send_messages=True,
+            can_send_media_messages=True,
+            can_send_polls=True,
+            can_send_other_messages=True,
+            can_add_web_page_previews=True
+        )
+    )
+
+    await context.bot.send_message(chat_id=chat_id, text=f"🔊 {name} 的禁言時間已到，自動解除～", parse_mode="HTML")
+    key = f"{user_id}_{chat_id}"
+    mute_jobs.pop(key, None)
+
+# /banme （群組公開指令）
 async def ban_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type not in ["group", "supergroup"]:
         await update.message.reply_text("這個指令只能在群組使用喔～")
@@ -161,16 +184,25 @@ async def ban_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user = update.effective_user
     chat_id = update.effective_chat.id
+    minutes = 2
 
     await context.bot.restrict_chat_member(
         chat_id=chat_id,
         user_id=user.id,
-        until_date=timedelta(minutes=2),
         permissions=ChatPermissions(can_send_messages=False)
     )
 
+    # 定時解除
+    job = context.job_queue.run_once(
+        unmute_user,
+        timedelta(minutes=minutes),
+        data={"user_id": user.id, "chat_id": chat_id, "name": user.mention_html()}
+    )
+    key = f"{user.id}_{chat_id}"
+    mute_jobs[key] = job
+
     await update.message.reply_text(
-        f"{user.mention_html()} 你自己要求的喔～\n被禁言 2 分鐘，冷靜一下 😂",
+        f"{user.mention_html()} 你自己要求的喔～\n被禁言 {minutes} 分鐘，冷靜一下 😂\n時間到會自動解除",
         parse_mode="HTML"
     )
 
@@ -184,9 +216,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/list - 顯示所有群組\n"
         "/members <編號> - 顯示最近活躍成員（含ID）\n"
         "/users <編號> - 顯示管理員\n"
-        "/ban <編號> <user_id> [分鐘] - 禁言（預設60分鐘，時間到自動解除）\n"
+        "/ban <編號> <user_id> [分鐘] - 禁言並群組宣布（時間到自動解除）\n"
         "/endorsement <編號> <內容> - Bot代發言\n\n"
-        "群組內公開指令：/banme - 自己禁言2分鐘（好玩用）"
+        "群組公開指令：\n/banme - 自己禁言2分鐘（好玩用）"
     )
 
 async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -243,7 +275,6 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"錯誤：{str(e)}")
 
-# 禁言 + 公開宣布 + 時間到自動解除
 async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         return
@@ -266,30 +297,38 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ 不能禁言 Bot 自己！")
             return
 
-        # 執行禁言（時間到自動解除）
+        # 立即禁言
         await context.bot.restrict_chat_member(
             chat_id=chat_id,
             user_id=user_id,
-            until_date=timedelta(minutes=minutes),
             permissions=ChatPermissions(can_send_messages=False)
         )
 
-        # 在群組公開宣布
+        # 定時解除
         try:
-            user = await context.bot.get_chat_member(chat_id, user_id)
-            user_mention = user.user.mention_html()
+            member = await context.bot.get_chat_member(chat_id, user_id)
+            user_mention = member.user.mention_html()
         except:
             user_mention = f"user_id {user_id}"
 
+        job = context.job_queue.run_once(
+            unmute_user,
+            timedelta(minutes=minutes),
+            data={"user_id": user_id, "chat_id": chat_id, "name": user_mention}
+        )
+        key = f"{user_id}_{chat_id}"
+        mute_jobs[key] = job
+
+        # 群組宣布
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"🔇 {user_mention} 被管理員禁言 {minutes} 分鐘（只能看不能說）",
+            text=f"🔇 {user_mention} 被管理員禁言 {minutes} 分鐘（只能看不能說）\n時間到會自動解除",
             parse_mode="HTML"
         )
 
-        await update.message.reply_text(f"✅ 已禁言並在群組宣布（{minutes} 分鐘後自動解除）")
+        await update.message.reply_text(f"✅ 已禁言 {minutes} 分鐘，並安排自動解除")
     except Exception as e:
-        await update.message.reply_text(f"❌ 禁言失敗：{str(e)}")
+        await update.message.reply_text(f"❌ 操作失敗：{str(e)}")
 
 async def endorsement(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
@@ -321,10 +360,8 @@ def main():
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_member))
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    # 群組公開指令（所有人可用）
     app.add_handler(CommandHandler("banme", ban_me, filters=filters.ChatType.GROUPS))
 
-    # 後台指令
     app.add_handler(CommandHandler("help", help_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("list", list_groups))
     app.add_handler(CommandHandler("members", list_members))
