@@ -1,5 +1,5 @@
 #!/bin/bash
-echo "============== Telegram 靜默管理機器人安裝 =============="
+echo "============== Telegram 隱形管理機器人安裝 =============="
 
 # 1. 安裝 Python 3.12
 if ! command -v python3.12 &> /dev/null; then
@@ -17,9 +17,20 @@ echo "📦 安裝依賴包..."
 pip install --upgrade pip
 pip install python-telegram-bot==20.7 -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-# 4. 設置 Token 和 管理員 ID
+# 4. 設置 Token 和 Owner ID
 read -p "請輸入你的 Telegram Bot Token：" BOT_TOKEN
-read -p "請輸入你的 Telegram 管理員 ID (從 @userinfobot 獲取)：" OWNER_ID
+read -p "請輸入你的 Telegram ID（在 @userinfobot 查詢）：" OWNER_ID
+
+# 驗證輸入
+if [[ -z "$BOT_TOKEN" ]]; then
+    echo "❌ Token 不能為空！"
+    exit 1
+fi
+
+if ! [[ "$OWNER_ID" =~ ^[0-9]+$ ]]; then
+    echo "❌ OWNER_ID 必須是數字！"
+    exit 1
+fi
 
 # 保存到環境變量
 echo "export BOT_TOKEN=$BOT_TOKEN" >> ~/.bashrc
@@ -30,54 +41,101 @@ echo "export OWNER_ID=$OWNER_ID" >> bot_env/bin/activate
 # 立即生效
 export BOT_TOKEN=$BOT_TOKEN
 export OWNER_ID=$OWNER_ID
+source ~/.bashrc
 
-echo "✅ Token 和 管理員ID 設置完成！"
+echo "✅ BOT_TOKEN 設置完成！"
+echo "✅ OWNER_ID 設置完成！"
 
-# 5. 下載主程序
-echo "📥 下載主程序..."
+# 5. 下載主程式
+echo "📥 下載主程式..."
 cat > main.py << 'EOF'
-[在這裡貼上上面的完整main.py代碼]
+[將上面的完整 main.py 代碼貼在這裡]
 EOF
 
-echo "✅ 主程序下載完成！"
-
-# 6. 配置提示（靜默模式）
-echo -e "\n⚠️  配置提示（靜默模式）:"
-echo "1. 向 @BotFather 設置指令列表:"
-echo "   /setcommands → 選擇機器人 → 粘貼:"
-echo "   start - 查看狀態（僅管理員）"
-echo "   banme - 群組小驚喜 🎁"
-echo "   list - 查看群組（僅管理員）"
-echo ""
-echo "2. 群組權限設置:"
+# 6. 關鍵配置提示
+echo -e "\n⚠️  必須完成以下配置："
+echo "1. 向 @BotFather 配置指令列表："
+echo "   - 發送 /setcommands"
+echo "   - 選擇你的機器人"
+echo "   - 粘貼以下內容："
+echo "     start - 管理員查看狀態（僅私聊）"
+echo "     banme - 發現驚喜（僅群組）"
+echo "     list - 管理員查看群組（僅私聊）"
+echo "2. 群組權限設置："
 echo "   - 將機器人設為管理員"
 echo "   - 開啟「限制成員」權限"
-echo "   - 關閉「匿名管理員」"
-echo ""
-echo "3. 靜默模式特點:"
-echo "   ✅ 進群不自我介紹"
-echo "   ✅ 不接受非管理員私聊"
-echo "   ✅ Banme改為小驚喜"
-echo "   ✅ 正常用戶不發歡迎消息"
+echo "   - 關閉「匿名管理員」模式"
+echo "3. 機器人特性："
+echo "   - 靜默加入群組，不發歡迎消息"
+echo "   - 不接受非管理員私聊"
+echo "   - /banme 變成驚喜功能"
 
-# 7. 運行提示
+# 7. 創建啟動腳本
+echo "🚀 創建啟動腳本..."
+cat > start_bot.sh << 'EOF'
+#!/bin/bash
+cd "$(dirname "$0")"
+source bot_env/bin/activate
+echo "🕶️ 啟動隱形管理機器人..."
+echo "📝 查看日誌: tail -f bot.log"
+echo "🛑 停止機器人: Ctrl+C"
+python main.py
+EOF
+
+chmod +x start_bot.sh
+
+# 8. 創建 systemd 服務（可選）
+read -p "是否創建 systemd 服務？(y/N): " CREATE_SERVICE
+if [[ "$CREATE_SERVICE" =~ ^[Yy]$ ]]; then
+    echo "📦 創建 systemd 服務..."
+    sudo cat > /etc/systemd/system/telegram-bot.service << EOF
+[Unit]
+Description=Telegram 隱形管理機器人
+After=network.target
+
+[Service]
+Type=simple
+User=$USER
+WorkingDirectory=$(pwd)
+Environment="BOT_TOKEN=$BOT_TOKEN"
+Environment="OWNER_ID=$OWNER_ID"
+ExecStart=$(pwd)/bot_env/bin/python $(pwd)/main.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable telegram-bot.service
+    echo "✅ systemd 服務已創建！"
+    echo "📋 管理命令："
+    echo "   sudo systemctl start telegram-bot    # 啟動"
+    echo "   sudo systemctl stop telegram-bot     # 停止"
+    echo "   sudo systemctl status telegram-bot   # 狀態"
+    echo "   sudo journalctl -u telegram-bot -f   # 查看日誌"
+fi
+
+# 9. 運行提示
 echo -e "\n============== 安裝完成！=============="
-echo "📱 功能特點:"
-echo "• 靜默加入群組，不發自我介紹"
-echo "• 僅管理員可私聊機器人"
-echo "• /banme 改為小驚喜模式"
-echo "• 自動檢測可疑用戶"
+echo "🕶️ 隱形管理機器人已配置完成"
+echo "👤 管理員 ID: $OWNER_ID"
 echo ""
-echo "🚀 啟動步驟:"
-echo "1. 激活環境: source bot_env/bin/activate"
-echo "2. 啟動機器人: python main.py"
-echo "3. 查看日誌: tail -f bot.log"
+echo "🚀 啟動方式："
+echo "1. 手動啟動: ./start_bot.sh"
+if [[ "$CREATE_SERVICE" =~ ^[Yy]$ ]]; then
+    echo "2. 服務啟動: sudo systemctl start telegram-bot"
+fi
 echo ""
-echo "🔧 管理員指令:"
-echo "• 私聊 /start - 查看狀態"
-echo "• 私聊 /list - 查看群組"
-echo "• 群組 /banme - 小驚喜"
+echo "🔧 配置驗證："
+echo "   檢查環境變量: echo \$BOT_TOKEN"
+echo "   檢查 OWNER_ID: echo \$OWNER_ID"
 echo ""
-echo "🛡️ 自動功能:"
-echo "• 可疑用戶自動禁言+驗證"
-echo "• 驗證成功自動解除"
+echo "🎯 功能特性："
+echo "   - 靜默加入群組（無歡迎消息）"
+echo "   - 只接受管理員私聊"
+echo "   - /banme 變成驚喜功能"
+echo "   - 自動檢測可疑用戶"
+echo ""
+echo "📝 查看日誌：tail -f bot.log"
