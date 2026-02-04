@@ -33,7 +33,8 @@ logger = logging.getLogger(__name__)
 
 # === 從環境變量讀取 OWNER_ID ===
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-BOT_VERSION = "v4.0.0-stealth-mode"
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_VERSION = "v4.1.0-auto-background"
 
 # 數據存儲
 known_groups: Dict[int, Dict] = {}
@@ -130,7 +131,7 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
             }
             save_known_groups()
             logger.info(f"✅ 靜默加入群組: {chat.title} (ID: {chat.id})")
-            # 靜默模式：不發送任何歡迎消息
+            # 靜默模式：不發送任何機器人歡迎消息
         
         elif new_status in ["left", "kicked"]:
             if chat.id in known_groups:
@@ -141,7 +142,7 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"處理機器人狀態失敗: {e}")
 
-# ================== 處理新成員加入（自動驗證） ==================
+# ================== 處理新成員加入（簡單歡迎語） ==================
 async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """處理普通成員加入"""
     try:
@@ -166,6 +167,16 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if old_status in ["left", "kicked"] and new_status == "member":
             logger.info(f"👤 新成員: {user.full_name} 加入 {chat.title}")
             
+            # 發送簡單歡迎語
+            try:
+                await context.bot.send_message(
+                    chat.id,
+                    f"👋 歡迎 {user.mention_html()} 加入 {chat.title}，請觀看置頂內容",
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.error(f"發送歡迎語失敗: {e}")
+            
             bio = ""
             try:
                 user_chat = await context.bot.get_chat(user.id)
@@ -189,7 +200,7 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 
                 has_perms, perm_msg = await check_bot_permissions(context.bot, chat.id)
                 if not has_perms:
-                    return  # 靜默模式，不發送公開消息
+                    return
                 
                 try:
                     await context.bot.restrict_chat_member(
@@ -216,8 +227,6 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     
                 except Exception as e:
                     logger.error(f"禁言失敗: {e}")
-            
-            # 靜默模式：取消正常用戶的歡迎消息
                     
     except Exception as e:
         logger.error(f"處理成員失敗: {e}")
@@ -272,9 +281,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
     
-    # 檢查是否私聊且是管理員
     if chat.type != "private":
-        return  # 群組中不回應
+        return
     
     if user.id != OWNER_ID:
         await update.message.reply_text(
@@ -292,7 +300,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - 管理群組數: {len(known_groups)}
 - 待驗證用戶: {len(pending_verifications)}
 
-🔧 運行模式: 隱形模式
+🔧 運行模式: 自動後台
 ✅ 所有功能正常
 """
     
@@ -316,10 +324,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 隱形管理機器人幫助\n\n"
         "🤖 機器人特性:\n"
-        "- 靜默加入群組，不發送歡迎消息\n"
+        "- 靜默加入群組，不發送機器人歡迎消息\n"
+        "- 新成員收到簡單歡迎語\n"
         "- 自動檢測可疑新成員\n"
         "- 不接受非管理員私聊\n"
-        "- 隱形管理模式\n\n"
+        "- 自動後台運行\n\n"
         "📋 管理員指令:\n"
         "/start - 查看狀態\n"
         "/list - 查看管理群組\n\n"
@@ -343,7 +352,6 @@ async def banme(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # 檢查用戶是否管理員
     try:
         user_member = await chat.get_member(user.id)
         if user_member.status in ["administrator", "creator"]:
@@ -356,21 +364,17 @@ async def banme(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
     
-    # 檢查機器人權限
     has_perms, perm_msg = await check_bot_permissions(context.bot, chat.id)
     if not has_perms:
-        # 隱形模式，不公開提示權限問題
         return
     
     try:
-        # 執行禁言（驚喜！）
         await context.bot.restrict_chat_member(
             chat_id=chat.id,
             user_id=user.id,
             permissions=create_mute_permissions(),
         )
         
-        # 有趣的隨機回應
         responses = [
             f"🎉 {user.mention_html()} 發現了隱藏驚喜！獲得2分鐘安靜時間～",
             f"🤫 {user.mention_html()} 觸發了神秘機關！請享受2分鐘靜音體驗",
@@ -391,12 +395,10 @@ async def banme(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML"
         )
         
-        # 2分鐘後解除
         asyncio.create_task(delayed_unmute(context.bot, chat.id, user.id, 2))
         
     except Exception as e:
         logger.error(f"/banme 失敗: {e}")
-        # 隱形模式，失敗也不提示
 
 async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """處理 /list 指令（僅管理員可用）"""
@@ -432,6 +434,15 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """全局錯誤處理"""
     logger.error(f"錯誤: {context.error}", exc_info=True)
 
+# ================== 後台運行檢查 ==================
+def check_background_service():
+    """檢查是否在後台運行"""
+    import sys
+    if '--background' in sys.argv:
+        print("✅ 以後台模式運行")
+        return True
+    return False
+
 # ================== 主程式 ==================
 def main():
     """主程序"""
@@ -455,25 +466,18 @@ def main():
         print("❌ 錯誤: OWNER_ID 必須是數字")
         return
     
-    # 加載群組數據
     load_known_groups()
     
-    # 創建應用
     application = Application.builder().token(bot_token).build()
     
-    # 註冊處理器
-    # 私聊指令（僅管理員）
     application.add_handler(CommandHandler("start", start, filters=filters.ChatType.PRIVATE))
     application.add_handler(CommandHandler("help", help_command, filters=filters.ChatType.PRIVATE))
     application.add_handler(CommandHandler("list", list_groups, filters=filters.ChatType.PRIVATE))
     
-    # 群組指令
     application.add_handler(CommandHandler("banme", banme, filters=filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP))
     
-    # 回調按鈕
     application.add_handler(CallbackQueryHandler(on_verify_click))
     
-    # 成員變化處理
     application.add_handler(ChatMemberHandler(
         handle_my_chat_member, 
         ChatMemberHandler.MY_CHAT_MEMBER
@@ -484,7 +488,6 @@ def main():
         ChatMemberHandler.CHAT_MEMBER
     ))
     
-    # 錯誤處理
     application.add_error_handler(error_handler)
     
     # 啟動信息
@@ -492,15 +495,17 @@ def main():
     print(f"🕶️ 隱形管理機器人 {BOT_VERSION}")
     print(f"👤 管理員 ID: {OWNER_ID}")
     print(f"📊 已記錄群組: {len(known_groups)} 個")
-    print(f"🔧 運行模式: 隱形模式")
+    print(f"🔧 運行模式: 自動後台")
     print(f"📝 日誌文件: bot.log")
     print(f"{'='*60}")
-    print("\n✅ 機器人正在靜默運行中...")
-    print("💡 特點:")
-    print("- 靜默加入群組，不發歡迎消息")
-    print("- 不接受非管理員私聊")
-    print("- /banme 變成驚喜功能")
-    print("- 只記錄日誌，減少公開提示")
+    
+    if check_background_service():
+        print("🤖 機器人正在後台靜默運行...")
+        print("💡 新成員會收到簡單歡迎語")
+        print("🚫 機器人自己不會發歡迎消息")
+    else:
+        print("\n✅ 機器人正在運行中...")
+        print("💡 在前台運行，按 Ctrl+C 停止")
     
     # 啟動
     try:

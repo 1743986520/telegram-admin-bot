@@ -1,53 +1,115 @@
 #!/bin/bash
-echo "============== Telegram 隱形管理機器人安裝 =============="
+echo "============== Telegram 隱形管理機器人 自動安裝 =============="
+
+# 顏色定義
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# 函數：顯示進度
+show_progress() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+show_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+show_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+show_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+# 檢查是否為 root 用戶
+if [ "$EUID" -ne 0 ]; then 
+    show_warning "建議使用 root 用戶運行此腳本"
+    read -p "是否繼續？(y/N): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
+fi
 
 # 1. 安裝 Python 3.12
+show_progress "檢查 Python 3.12..."
 if ! command -v python3.12 &> /dev/null; then
-    echo "❌ 未檢測到 Python 3.12+，開始安裝..."
+    show_progress "安裝 Python 3.12..."
     apt-get update && apt-get install -y python3.12 python3.12-venv python3-pip
+    if [ $? -eq 0 ]; then
+        show_success "Python 3.12 安裝完成"
+    else
+        show_error "Python 3.12 安裝失敗"
+        exit 1
+    fi
+else
+    show_success "Python 3.12 已安裝"
 fi
 
-# 2. 創建虛擬環境
-echo "🐍 創建虛擬環境..."
-python3.12 -m venv bot_env
-source bot_env/bin/activate || { echo "❌ 虛擬環境激活失敗"; exit 1; }
+# 2. 獲取安裝參數
+show_progress "獲取安裝參數..."
 
-# 3. 安裝依賴
-echo "📦 安裝依賴包..."
+# 檢查是否有命令行參數
+if [ $# -ge 2 ]; then
+    BOT_TOKEN="$1"
+    OWNER_ID="$2"
+    show_progress "使用命令行參數: Token=${BOT_TOKEN:0:10}..., OwnerID=$OWNER_ID"
+else
+    # 交互式輸入
+    echo -e "\n${BLUE}=== 請輸入配置信息 ===${NC}"
+    
+    while true; do
+        read -p "請輸入 Telegram Bot Token: " BOT_TOKEN
+        if [[ -n "$BOT_TOKEN" ]]; then
+            break
+        else
+            show_error "Token 不能為空"
+        fi
+    done
+    
+    while true; do
+        read -p "請輸入你的 Telegram ID (在 @userinfobot 查詢): " OWNER_ID
+        if [[ "$OWNER_ID" =~ ^[0-9]+$ ]]; then
+            break
+        else
+            show_error "OWNER_ID 必須是數字"
+        fi
+    done
+fi
+
+# 3. 創建安裝目錄
+INSTALL_DIR="/opt/telegram-admin-bot"
+show_progress "創建安裝目錄: $INSTALL_DIR"
+mkdir -p "$INSTALL_DIR"
+cd "$INSTALL_DIR"
+
+# 4. 創建虛擬環境
+show_progress "創建 Python 虛擬環境..."
+python3.12 -m venv bot_env
+if [ $? -ne 0 ]; then
+    show_error "虛擬環境創建失敗"
+    exit 1
+fi
+
+source bot_env/bin/activate
+
+# 5. 安裝依賴
+show_progress "安裝依賴包..."
 pip install --upgrade pip
 pip install python-telegram-bot==20.7 -i https://pypi.tuna.tsinghua.edu.cn/simple
-
-# 4. 設置 Token 和 Owner ID
-read -p "請輸入你的 Telegram Bot Token：" BOT_TOKEN
-read -p "請輸入你的 Telegram ID（在 @userinfobot 查詢）：" OWNER_ID
-
-# 驗證輸入
-if [[ -z "$BOT_TOKEN" ]]; then
-    echo "❌ Token 不能為空！"
+if [ $? -eq 0 ]; then
+    show_success "依賴安裝完成"
+else
+    show_error "依賴安裝失敗"
     exit 1
 fi
 
-if ! [[ "$OWNER_ID" =~ ^[0-9]+$ ]]; then
-    echo "❌ OWNER_ID 必須是數字！"
-    exit 1
-fi
-
-# 保存到環境變量
-echo "export BOT_TOKEN=$BOT_TOKEN" >> ~/.bashrc
-echo "export OWNER_ID=$OWNER_ID" >> ~/.bashrc
-echo "export BOT_TOKEN=$BOT_TOKEN" >> bot_env/bin/activate
-echo "export OWNER_ID=$OWNER_ID" >> bot_env/bin/activate
-
-# 立即生效
-export BOT_TOKEN=$BOT_TOKEN
-export OWNER_ID=$OWNER_ID
-source ~/.bashrc
-
-echo "✅ BOT_TOKEN 設置完成！"
-echo "✅ OWNER_ID 設置完成！"
-
-# 5. 創建主程式
-echo "📝 創建主程式..."
+# 6. 創建主程式
+show_progress "創建主程式..."
 cat > main.py << 'EOF'
 import os
 import re
@@ -84,7 +146,8 @@ logger = logging.getLogger(__name__)
 
 # === 從環境變量讀取 OWNER_ID ===
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-BOT_VERSION = "v4.0.0-stealth-mode"
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_VERSION = "v4.1.0-auto-background"
 
 # 數據存儲
 known_groups: Dict[int, Dict] = {}
@@ -191,7 +254,7 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"處理機器人狀態失敗: {e}")
 
-# ================== 處理新成員加入（自動驗證） ==================
+# ================== 處理新成員加入（簡單歡迎語） ==================
 async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """處理普通成員加入"""
     try:
@@ -215,6 +278,15 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         if old_status in ["left", "kicked"] and new_status == "member":
             logger.info(f"👤 新成員: {user.full_name} 加入 {chat.title}")
+            
+            try:
+                await context.bot.send_message(
+                    chat.id,
+                    f"👋 歡迎 {user.mention_html()} 加入 {chat.title}，請觀看置頂內容",
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.error(f"發送歡迎語失敗: {e}")
             
             bio = ""
             try:
@@ -339,7 +411,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - 管理群組數: {len(known_groups)}
 - 待驗證用戶: {len(pending_verifications)}
 
-🔧 運行模式: 隱形模式
+🔧 運行模式: 自動後台
 ✅ 所有功能正常
 """
     
@@ -363,10 +435,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 隱形管理機器人幫助\n\n"
         "🤖 機器人特性:\n"
-        "- 靜默加入群組，不發送歡迎消息\n"
+        "- 靜默加入群組，不發送機器人歡迎消息\n"
+        "- 新成員收到簡單歡迎語\n"
         "- 自動檢測可疑新成員\n"
         "- 不接受非管理員私聊\n"
-        "- 隱形管理模式\n\n"
+        "- 自動後台運行\n\n"
         "📋 管理員指令:\n"
         "/start - 查看狀態\n"
         "/list - 查看管理群組\n\n"
@@ -522,10 +595,10 @@ def main():
     print(f"🕶️ 隱形管理機器人 {BOT_VERSION}")
     print(f"👤 管理員 ID: {OWNER_ID}")
     print(f"📊 已記錄群組: {len(known_groups)} 個")
-    print(f"🔧 運行模式: 隱形模式")
+    print(f"🔧 運行模式: 自動後台")
     print(f"📝 日誌文件: bot.log")
     print(f"{'='*60}")
-    print("\n✅ 機器人正在靜默運行中...")
+    print("\n✅ 機器人正在後台靜默運行...")
     
     try:
         application.run_polling(
@@ -546,50 +619,191 @@ if __name__ == "__main__":
     main()
 EOF
 
-# 6. 創建啟動腳本
-echo "🚀 創建啟動腳本..."
-cat > start_bot.sh << 'EOF'
-#!/bin/bash
-cd "$(dirname "$0")"
-source bot_env/bin/activate
-echo "🕶️ 啟動隱形管理機器人..."
-echo "📝 查看日誌: tail -f bot.log"
-echo "🛑 停止機器人: Ctrl+C"
-python main.py
+show_success "主程式創建完成"
+
+# 7. 創建環境變量文件
+show_progress "創建環境變量配置文件..."
+cat > /etc/profile.d/telegram-bot.sh << EOF
+export BOT_TOKEN="$BOT_TOKEN"
+export OWNER_ID="$OWNER_ID"
 EOF
 
-chmod +x start_bot.sh
+chmod +x /etc/profile.d/telegram-bot.sh
 
-# 7. 關鍵配置提示
-echo -e "\n⚠️  必須完成以下配置："
-echo "1. 向 @BotFather 配置指令列表："
-echo "   - 發送 /setcommands"
-echo "   - 選擇你的機器人"
-echo "   - 粘貼以下內容："
-echo "     start - 管理員查看狀態（僅私聊）"
-echo "     banme - 發現驚喜（僅群組）"
-echo "     list - 管理員查看群組（僅私聊）"
-echo "2. 群組權限設置："
-echo "   - 將機器人設為管理員"
-echo "   - 開啟「限制成員」權限"
-echo "   - 關閉「匿名管理員」模式"
+# 立即生效
+export BOT_TOKEN="$BOT_TOKEN"
+export OWNER_ID="$OWNER_ID"
 
-# 8. 運行提示
-echo -e "\n============== 安裝完成！=============="
-echo "🕶️ 隱形管理機器人已配置完成"
-echo "👤 管理員 ID: $OWNER_ID"
+# 8. 創建 systemd 服務（自動後台運行）
+show_progress "創建 systemd 服務..."
+cat > /etc/systemd/system/telegram-bot.service << EOF
+[Unit]
+Description=Telegram 隱形管理機器人
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$INSTALL_DIR
+Environment="BOT_TOKEN=$BOT_TOKEN"
+Environment="OWNER_ID=$OWNER_ID"
+ExecStart=$INSTALL_DIR/bot_env/bin/python $INSTALL_DIR/main.py
+Restart=always
+RestartSec=10
+StandardOutput=append:$INSTALL_DIR/bot_service.log
+StandardError=append:$INSTALL_DIR/bot_error.log
+
+# 安全設置
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 9. 創建管理腳本
+show_progress "創建管理腳本..."
+cat > /usr/local/bin/telegram-bot << 'EOF'
+#!/bin/bash
+case "\$1" in
+    start)
+        systemctl start telegram-bot
+        echo "✅ 啟動機器人"
+        ;;
+    stop)
+        systemctl stop telegram-bot
+        echo "🛑 停止機器人"
+        ;;
+    restart)
+        systemctl restart telegram-bot
+        echo "🔄 重啟機器人"
+        ;;
+    status)
+        systemctl status telegram-bot
+        ;;
+    logs)
+        tail -f /opt/telegram-admin-bot/bot.log
+        ;;
+    logs-service)
+        tail -f /opt/telegram-admin-bot/bot_service.log
+        ;;
+    update)
+        cd /opt/telegram-admin-bot
+        source bot_env/bin/activate
+        pip install --upgrade python-telegram-bot
+        systemctl restart telegram-bot
+        echo "📦 更新完成並重啟"
+        ;;
+    config)
+        echo "🔧 當前配置:"
+        echo "   Token: \${BOT_TOKEN:0:10}..."
+        echo "   Owner ID: \$OWNER_ID"
+        echo "   安裝目錄: /opt/telegram-admin-bot"
+        ;;
+    help|*)
+        echo "📖 Telegram 隱形管理機器人 管理命令"
+        echo "用法: telegram-bot {start|stop|restart|status|logs|logs-service|update|config|help}"
+        echo ""
+        echo "命令說明:"
+        echo "  start     - 啟動機器人"
+        echo "  stop      - 停止機器人"
+        echo "  restart   - 重啟機器人"
+        echo "  status    - 查看狀態"
+        echo "  logs      - 查看應用日誌"
+        echo "  logs-service - 查看服務日誌"
+        echo "  update    - 更新依賴"
+        echo "  config    - 查看配置"
+        echo "  help      - 顯示幫助"
+        ;;
+esac
+EOF
+
+chmod +x /usr/local/bin/telegram-bot
+
+# 10. 啟動服務
+show_progress "啟動 systemd 服務..."
+systemctl daemon-reload
+systemctl enable telegram-bot
+systemctl start telegram-bot
+
+# 檢查服務狀態
+sleep 3
+if systemctl is-active --quiet telegram-bot; then
+    show_success "機器人服務啟動成功"
+else
+    show_error "服務啟動失敗，檢查日誌: journalctl -u telegram-bot -f"
+    exit 1
+fi
+
+# 11. 創建配置檢查腳本
+show_progress "創建配置檢查腳本..."
+cat > /opt/telegram-admin-bot/check_config.sh << 'EOF'
+#!/bin/bash
+echo "🔧 配置檢查"
+echo "=========="
+echo "安裝目錄: /opt/telegram-admin-bot"
+echo "Python 版本: $(python3.12 --version 2>/dev/null || echo '未安裝')"
+echo "虛擬環境: $(ls -d /opt/telegram-admin-bot/bot_env 2>/dev/null && echo '存在' || echo '不存在')"
 echo ""
-echo "🚀 啟動方式："
-echo "   手動啟動: ./start_bot.sh"
+echo "環境變量:"
+echo "  BOT_TOKEN: ${BOT_TOKEN:0:10}..."
+echo "  OWNER_ID: $OWNER_ID"
 echo ""
-echo "🔧 配置驗證："
-echo "   檢查環境變量: echo \$BOT_TOKEN"
-echo "   檢查 OWNER_ID: echo \$OWNER_ID"
+echo "服務狀態:"
+systemctl status telegram-bot --no-pager -l
 echo ""
-echo "🎯 功能特性："
-echo "   - 靜默加入群組（無歡迎消息）"
-echo "   - 只接受管理員私聊"
-echo "   - /banme 變成驚喜功能"
-echo "   - 自動檢測可疑用戶"
+echo "日誌文件:"
+ls -la /opt/telegram-admin-bot/*.log 2>/dev/null || echo "無日誌文件"
+EOF
+
+chmod +x /opt/telegram-admin-bot/check_config.sh
+
+# 12. 安裝完成
+echo -e "\n${GREEN}============== 安裝完成！ ==============${NC}"
 echo ""
-echo "📝 查看日誌：tail -f bot.log"
+echo "📋 安裝摘要:"
+echo "   安裝目錄: $INSTALL_DIR"
+echo "   Bot Token: ${BOT_TOKEN:0:10}..."
+echo "   管理員 ID: $OWNER_ID"
+echo "   服務名稱: telegram-bot"
+echo ""
+echo "🎯 功能特性:"
+echo "   ✅ 靜默加入群組（機器人不發歡迎）"
+echo "   ✅ 新成員歡迎語: '歡迎 username 加入 groupname，請觀看置頂內容'"
+echo "   ✅ 自動後台運行"
+echo "   ✅ 不接受非管理員私聊"
+echo "   ✅ /banme 驚喜功能"
+echo "   ✅ 自動檢測可疑用戶"
+echo ""
+echo "🚀 管理命令:"
+echo "   telegram-bot start      # 啟動"
+echo "   telegram-bot stop       # 停止"
+echo "   telegram-bot restart    # 重啟"
+echo "   telegram-bot status     # 狀態"
+echo "   telegram-bot logs       # 查看日誌"
+echo "   telegram-bot config     # 查看配置"
+echo ""
+echo "📝 重要日誌文件:"
+echo "   $INSTALL_DIR/bot.log          # 應用日誌"
+echo "   $INSTALL_DIR/bot_service.log  # 服務日誌"
+echo "   $INSTALL_DIR/bot_error.log    # 錯誤日誌"
+echo ""
+echo "🔧 配置驗證:"
+echo "   /opt/telegram-admin-bot/check_config.sh"
+echo ""
+echo "⚙️  快速安裝（未來）:"
+echo "   ./install.sh '你的Token' '你的TelegramID'"
+echo ""
+echo "📌 必須完成:"
+echo "   1. 在 @BotFather 設置 /setcommands"
+echo "   2. 將機器人設為群組管理員"
+echo "   3. 開啟「限制成員」權限"
+echo ""
+echo "🎉 機器人已自動在後台運行！"
+
+# 顯示服務狀態
+echo -e "\n${BLUE}=== 當前服務狀態 ===${NC}"
+systemctl status telegram-bot --no-pager | head -20
