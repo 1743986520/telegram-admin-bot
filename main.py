@@ -35,39 +35,88 @@ logger = logging.getLogger(__name__)
 
 # === 重要：必須修改這兩個值 ===
 OWNER_ID = 7807347685  # 改成你的 Telegram ID（@userinfobot 查詢）
-BOT_VERSION = "v3.0.0-final-fix"
+BOT_VERSION = "v3.1.0-compatible"
 
 # 數據存儲
 known_groups: Dict[int, Dict] = {}  # chat_id -> {"title": "...", "added_at": timestamp}
 pending_verifications: Dict[int, int] = {}  # user_id -> chat_id
 
-# ================== 權限設定（Telegram官方推薦） ==================
+# ================== 權限設定（兼容所有版本） ==================
 def mute_permissions() -> ChatPermissions:
-    """完全禁言權限"""
+    """完全禁言權限（兼容版本）"""
+    try:
+        # 嘗試新版本參數
+        return ChatPermissions(
+            can_send_messages=False,
+            can_send_media_messages=False,
+            can_send_polls=False,
+            can_send_other_messages=False,
+            can_add_web_page_previews=False,
+            can_change_info=False,
+            can_invite_users=False,
+            can_pin_messages=False,
+            can_manage_topics=False,
+        )
+    except TypeError:
+        # 舊版本參數
+        return ChatPermissions(
+            can_send_messages=False,
+            can_send_media_messages=False,
+            can_send_polls=False,
+            can_send_other_messages=False,
+            can_add_web_page_previews=False,
+            can_change_info=False,
+            can_invite_users=False,
+            can_pin_messages=False,
+        )
+
+def unmute_permissions() -> ChatPermissions:
+    """正常用戶權限（兼容版本）"""
+    try:
+        # 嘗試新版本參數
+        return ChatPermissions(
+            can_send_messages=True,
+            can_send_media_messages=True,
+            can_send_polls=True,
+            can_send_other_messages=True,
+            can_add_web_page_previews=True,
+            can_change_info=False,
+            can_invite_users=True,
+            can_pin_messages=False,
+            can_manage_topics=False,
+        )
+    except TypeError:
+        # 舊版本參數
+        return ChatPermissions(
+            can_send_messages=True,
+            can_send_media_messages=True,
+            can_send_polls=True,
+            can_send_other_messages=True,
+            can_add_web_page_previews=True,
+            can_change_info=False,
+            can_invite_users=True,
+            can_pin_messages=False,
+        )
+
+# 或者更簡單的版本（只設置必要權限）：
+def simple_mute_permissions() -> ChatPermissions:
+    """簡單禁言權限（只設置必要參數）"""
     return ChatPermissions(
         can_send_messages=False,
         can_send_media_messages=False,
         can_send_polls=False,
         can_send_other_messages=False,
         can_add_web_page_previews=False,
-        can_change_info=False,
-        can_invite_users=False,
-        can_pin_messages=False,
-        can_manage_topics=False,
     )
 
-def unmute_permissions() -> ChatPermissions:
-    """正常用戶權限（解除禁言）"""
+def simple_unmute_permissions() -> ChatPermissions:
+    """簡單解除禁言（只設置必要參數）"""
     return ChatPermissions(
         can_send_messages=True,
         can_send_media_messages=True,
         can_send_polls=True,
         can_send_other_messages=True,
         can_add_web_page_previews=True,
-        can_change_info=False,
-        can_invite_users=True,
-        can_pin_messages=False,
-        can_manage_topics=False,
     )
 
 # ================== 工具函數 ==================
@@ -99,17 +148,18 @@ async def delayed_unmute(bot, chat_id: int, user_id: int, minutes: int):
     """延遲解除禁言"""
     await asyncio.sleep(minutes * 60)
     try:
+        # 使用簡單版本確保兼容性
         await bot.restrict_chat_member(
             chat_id=chat_id,
             user_id=user_id,
-            permissions=unmute_permissions(),
+            permissions=simple_unmute_permissions(),
         )
         logger.info(f"✅ 自動解除禁言: 用戶 {user_id} 在群組 {chat_id}")
     except Exception as e:
         logger.error(f"解除禁言失敗: {e}")
 
 async def check_bot_permissions(bot, chat_id: int) -> tuple[bool, str]:
-    """檢查機器人權限（修復版）"""
+    """檢查機器人權限"""
     try:
         bot_member = await bot.get_chat_member(chat_id, bot.id)
         
@@ -236,12 +286,12 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     )
                     return
                 
-                # 禁言用戶
+                # 禁言用戶（使用簡單版本）
                 try:
                     await context.bot.restrict_chat_member(
                         chat_id=chat.id,
                         user_id=user.id,
-                        permissions=mute_permissions(),
+                        permissions=simple_mute_permissions(),
                     )
                     
                     pending_verifications[user.id] = chat.id
@@ -305,12 +355,12 @@ async def on_verify_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ 驗證已過期")
             return
         
-        # 解除禁言
+        # 解除禁言（使用簡單版本）
         try:
             await context.bot.restrict_chat_member(
                 chat_id=chat_id,
                 user_id=user_id,
-                permissions=unmute_permissions(),
+                permissions=simple_unmute_permissions(),
             )
             
             # 移除待驗證
@@ -341,6 +391,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 📋 可用指令:
 /start - 查看幫助
+/help - 查看詳細幫助
 /banme - 自願禁言2分鐘 (僅群組)
 /list - 查看管理群組 (僅管理員私聊)
 
@@ -361,12 +412,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 幫助信息\n\n"
         "1. /start - 查看狀態\n"
-        "2. /banme - 群組內自願禁言2分鐘\n"
-        "3. /list - 管理員查看群組列表\n\n"
+        "2. /help - 查看詳細幫助\n"
+        "3. /banme - 群組內自願禁言2分鐘\n"
+        "4. /list - 管理員查看群組列表\n\n"
         "⚠️ 注意:\n"
         "- 機器人需要管理員權限\n"
         "- 開啟「限制成員」權限\n"
-        "- 關閉「匿名管理員」",
+        "- 關閉「匿名管理員」\n\n"
+        "🔧 故障排除:\n"
+        "- 指令無反應: 在 @BotFather 設置 /setcommands\n"
+        "- 禁言失敗: 檢查機器人權限\n"
+        "- 無群組記錄: 重新邀請機器人入群",
         parse_mode="HTML"
     )
 
@@ -406,11 +462,11 @@ async def banme(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ 管理員不能使用此指令！")
             return
         
-        # 執行禁言
+        # 執行禁言（使用簡單版本）
         await context.bot.restrict_chat_member(
             chat_id=chat.id,
             user_id=user.id,
-            permissions=mute_permissions(),
+            permissions=simple_mute_permissions(),
         )
         
         await update.message.reply_text(
@@ -458,7 +514,9 @@ async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "可能原因:\n"
             "1. 機器人未加入群組\n"
             "2. 重新啟動機器人後需要重新加入\n"
-            "3. 等待新成員觸發記錄"
+            "3. 等待新成員觸發記錄\n\n"
+            "💡 解決方法:\n"
+            "重新邀請機器人加入群組"
         )
         return
     
@@ -507,6 +565,19 @@ def main():
         print("請執行: export BOT_TOKEN='你的Token'")
         return
     
+    # 檢查 Python 版本和庫版本
+    import sys
+    try:
+        import telegram
+        print(f"📦 python-telegram-bot 版本: {telegram.__version__}")
+        
+        # 測試 ChatPermissions
+        test_perm = ChatPermissions(can_send_messages=False)
+        print("✅ ChatPermissions 兼容性測試通過")
+        
+    except Exception as e:
+        print(f"⚠️ 庫版本警告: {e}")
+    
     # 加載群組數據
     load_known_groups()
     
@@ -542,6 +613,7 @@ def main():
     # 啟動信息
     print(f"\n{'='*60}")
     print(f"🤖 Telegram Admin Bot {BOT_VERSION}")
+    print(f"🐍 Python 版本: {sys.version.split()[0]}")
     print(f"👤 Owner ID: {OWNER_ID}")
     print(f"🔑 Token: {bot_token[:10]}...{bot_token[-10:]}")
     print(f"📊 已記錄群組: {len(known_groups)} 個")
