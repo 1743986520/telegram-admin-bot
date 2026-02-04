@@ -1,5 +1,5 @@
 #!/bin/bash
-echo "============== Telegram Admin Bot 修復版安裝 =============="
+echo "============== Telegram 靜默管理機器人安裝 =============="
 
 # 1. 安裝 Python 3.12
 if ! command -v python3.12 &> /dev/null; then
@@ -15,39 +15,69 @@ source bot_env/bin/activate || { echo "❌ 虛擬環境激活失敗"; exit 1; }
 # 3. 安裝依賴
 echo "📦 安裝依賴包..."
 pip install --upgrade pip
-pip install python-telegram-bot==22.0 -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install python-telegram-bot==20.7 -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-# 4. 設置 Token
+# 4. 設置 Token 和 管理員 ID
 read -p "請輸入你的 Telegram Bot Token：" BOT_TOKEN
+read -p "請輸入你的 Telegram 管理員 ID (從 @userinfobot 獲取)：" OWNER_ID
+
+# 保存到環境變量
 echo "export BOT_TOKEN=$BOT_TOKEN" >> ~/.bashrc
+echo "export OWNER_ID=$OWNER_ID" >> ~/.bashrc
 echo "export BOT_TOKEN=$BOT_TOKEN" >> bot_env/bin/activate
-source ~/.bashrc
-echo "✅ BOT_TOKEN 設置完成！"
+echo "export OWNER_ID=$OWNER_ID" >> bot_env/bin/activate
 
-# 5. 下載修復版代碼
-echo "📥 下載修復版代碼..."
-curl -s https://raw.githubusercontent.com/your-repo/main.py -o main.py
+# 立即生效
+export BOT_TOKEN=$BOT_TOKEN
+export OWNER_ID=$OWNER_ID
 
-# 6. 配置提示
-echo -e "\n⚠️  重要配置步驟："
-echo "1. 修改 OWNER_ID："
-echo "   - 編輯 main.py，將 OWNER_ID = 7807347685 替換為你的 Telegram ID"
-echo "2. 設置 BotFather 指令："
-echo "   - 向 @BotFather 發送 /setcommands"
-echo "   - 選擇你的機器人"
-echo "   - 粘貼以下內容："
-echo "     start - 查看機器人狀態"
-echo "     banme - 群組內自願禁言2分鐘"
-echo "     list - 私聊查詢管理群組"
-echo "3. 群組權限："
+echo "✅ Token 和 管理員ID 設置完成！"
+
+# 5. 下載主程序
+echo "📥 下載主程序..."
+cat > main.py << 'EOF'
+[在這裡貼上上面的完整main.py代碼]
+EOF
+
+echo "✅ 主程序下載完成！"
+
+# 6. 配置提示（靜默模式）
+echo -e "\n⚠️  配置提示（靜默模式）:"
+echo "1. 向 @BotFather 設置指令列表:"
+echo "   /setcommands → 選擇機器人 → 粘貼:"
+echo "   start - 查看狀態（僅管理員）"
+echo "   banme - 群組小驚喜 🎁"
+echo "   list - 查看群組（僅管理員）"
+echo ""
+echo "2. 群組權限設置:"
 echo "   - 將機器人設為管理員"
 echo "   - 開啟「限制成員」權限"
 echo "   - 關閉「匿名管理員」"
+echo ""
+echo "3. 靜默模式特點:"
+echo "   ✅ 進群不自我介紹"
+echo "   ✅ 不接受非管理員私聊"
+echo "   ✅ Banme改為小驚喜"
+echo "   ✅ 正常用戶不發歡迎消息"
 
-# 7. 啟動測試
+# 7. 運行提示
 echo -e "\n============== 安裝完成！=============="
-echo "啟動步驟："
-echo "1. source bot_env/bin/activate"
-echo "2. python main.py"
-echo "3. 查看日誌：tail -f bot.log"
-echo "4. 將機器人加入群組測試"
+echo "📱 功能特點:"
+echo "• 靜默加入群組，不發自我介紹"
+echo "• 僅管理員可私聊機器人"
+echo "• /banme 改為小驚喜模式"
+echo "• 自動檢測可疑用戶"
+echo ""
+echo "🚀 啟動步驟:"
+echo "1. 激活環境: source bot_env/bin/activate"
+echo "2. 啟動機器人: python main.py"
+echo "3. 查看日誌: tail -f bot.log"
+echo ""
+echo "🔧 管理員指令:"
+echo "• 私聊 /start - 查看狀態"
+echo "• 私聊 /list - 查看群組"
+echo "• 群組 /banme - 小驚喜"
+echo ""
+echo "🛡️ 自動功能:"
+echo "• 可疑用戶自動禁言+驗證"
+echo "• 驗證成功自動解除"
