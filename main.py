@@ -34,90 +34,78 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # === 重要：必須修改這兩個值 ===
-OWNER_ID = 7807347685  # 改成你的 Telegram ID（@userinfobot 查詢）
-BOT_VERSION = "v3.1.0-compatible"
+OWNER_ID = 7807347685  # 改成你的 Telegram ID
+BOT_VERSION = "v3.2.0-ultimate-fix"
 
 # 數據存儲
-known_groups: Dict[int, Dict] = {}  # chat_id -> {"title": "...", "added_at": timestamp}
-pending_verifications: Dict[int, int] = {}  # user_id -> chat_id
+known_groups: Dict[int, Dict] = {}
+pending_verifications: Dict[int, int] = {}
 
-# ================== 權限設定（兼容所有版本） ==================
-def mute_permissions() -> ChatPermissions:
-    """完全禁言權限（兼容版本）"""
+# ================== 權限設定（完全兼容版） ==================
+def create_mute_permissions():
+    """創建禁言權限（兼容所有版本）"""
+    # 嘗試不同版本的參數組合
     try:
-        # 嘗試新版本參數
-        return ChatPermissions(
-            can_send_messages=False,
-            can_send_media_messages=False,
-            can_send_polls=False,
-            can_send_other_messages=False,
-            can_add_web_page_previews=False,
-            can_change_info=False,
-            can_invite_users=False,
-            can_pin_messages=False,
-            can_manage_topics=False,
-        )
-    except TypeError:
-        # 舊版本參數
-        return ChatPermissions(
-            can_send_messages=False,
-            can_send_media_messages=False,
-            can_send_polls=False,
-            can_send_other_messages=False,
-            can_add_web_page_previews=False,
-            can_change_info=False,
-            can_invite_users=False,
-            can_pin_messages=False,
-        )
+        # 嘗試最簡單的參數（最基本）
+        return ChatPermissions(can_send_messages=False)
+    except Exception as e1:
+        logger.warning(f"簡單參數失敗: {e1}")
+        try:
+            # 嘗試舊版參數
+            return ChatPermissions(
+                can_send_messages=False,
+                can_send_media_messages=False,
+                can_send_polls=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False,
+            )
+        except Exception as e2:
+            logger.warning(f"舊版參數失敗: {e2}")
+            # 最後嘗試：使用字典方式
+            try:
+                return ChatPermissions(**{
+                    'can_send_messages': False,
+                    'can_send_media_messages': False,
+                    'can_send_polls': False,
+                    'can_send_other_messages': False,
+                    'can_add_web_page_previews': False,
+                })
+            except Exception as e3:
+                logger.error(f"所有參數組合都失敗: {e3}")
+                # 返回最基礎的禁言
+                return ChatPermissions(can_send_messages=False)
 
-def unmute_permissions() -> ChatPermissions:
-    """正常用戶權限（兼容版本）"""
+def create_unmute_permissions():
+    """創建解除禁言權限（兼容所有版本）"""
     try:
-        # 嘗試新版本參數
-        return ChatPermissions(
-            can_send_messages=True,
-            can_send_media_messages=True,
-            can_send_polls=True,
-            can_send_other_messages=True,
-            can_add_web_page_previews=True,
-            can_change_info=False,
-            can_invite_users=True,
-            can_pin_messages=False,
-            can_manage_topics=False,
-        )
-    except TypeError:
-        # 舊版本參數
-        return ChatPermissions(
-            can_send_messages=True,
-            can_send_media_messages=True,
-            can_send_polls=True,
-            can_send_other_messages=True,
-            can_add_web_page_previews=True,
-            can_change_info=False,
-            can_invite_users=True,
-            can_pin_messages=False,
-        )
-
-# 或者更簡單的版本（只設置必要權限）：
-def simple_mute_permissions() -> ChatPermissions:
-    """簡單禁言權限（只設置必要參數）"""
-    return ChatPermissions(
-        can_send_messages=False,
-        can_send_media_messages=False,
-        can_send_polls=False,
-        can_send_other_messages=False,
-        can_add_web_page_previews=False,
-    )
-
-def simple_unmute_permissions() -> ChatPermissions:
-    """簡單解除禁言（只設置必要參數）"""
-    return ChatPermissions(
-        can_send_messages=True,
-        can_send_media_messages=True,
-        can_send_polls=True,
-        can_send_other_messages=True,
-        can_add_web_page_previews=True,
-    )
+        # 嘗試最簡單的參數
+        return ChatPermissions(can_send_messages=True)
+    except Exception as e1:
+        logger.warning(f"簡單參數失敗: {e1}")
+        try:
+            # 嘗試舊版參數
+            return ChatPermissions(
+                can_send_messages=True,
+                can_send_media_messages=True,
+                can_send_polls=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True,
+            )
+        except Exception as e2:
+            logger.warning(f"舊版參數失敗: {e2}")
+            # 最後嘗試：使用字典方式
+            try:
+                return ChatPermissions(**{
+                    'can_send_messages': True,
+                    'can_send_media_messages': True,
+                    'can_send_polls': True,
+                    'can_send_other_messages': True,
+                    'can_add_web_page_previews': True,
+                })
+            except Exception as e3:
+                logger.error(f"所有參數組合都失敗: {e3}")
+                # 返回最基礎的權限
+                return ChatPermissions(can_send_messages=True)
 
 # ================== 工具函數 ==================
 def save_known_groups():
@@ -136,7 +124,6 @@ def load_known_groups():
         with open("known_groups.json", "r", encoding='utf-8') as f:
             import json
             known_groups = json.load(f)
-            # 轉換鍵為整數
             known_groups = {int(k): v for k, v in known_groups.items()}
     except FileNotFoundError:
         known_groups = {}
@@ -148,11 +135,10 @@ async def delayed_unmute(bot, chat_id: int, user_id: int, minutes: int):
     """延遲解除禁言"""
     await asyncio.sleep(minutes * 60)
     try:
-        # 使用簡單版本確保兼容性
         await bot.restrict_chat_member(
             chat_id=chat_id,
             user_id=user_id,
-            permissions=simple_unmute_permissions(),
+            permissions=create_unmute_permissions(),
         )
         logger.info(f"✅ 自動解除禁言: 用戶 {user_id} 在群組 {chat_id}")
     except Exception as e:
@@ -163,11 +149,9 @@ async def check_bot_permissions(bot, chat_id: int) -> tuple[bool, str]:
     try:
         bot_member = await bot.get_chat_member(chat_id, bot.id)
         
-        # 檢查是否為管理員
         if bot_member.status != "administrator" and bot_member.status != "creator":
             return False, "❌ 機器人不是管理員"
         
-        # 檢查是否有限制成員權限
         if bot_member.status == "administrator":
             if not hasattr(bot_member, 'can_restrict_members') or not bot_member.can_restrict_members:
                 return False, "❌ 缺少「限制成員」權限"
@@ -176,7 +160,7 @@ async def check_bot_permissions(bot, chat_id: int) -> tuple[bool, str]:
     except Exception as e:
         return False, f"❌ 檢查權限失敗: {e}"
 
-# ================== 修復：記錄機器人加入的群組 ==================
+# ================== 處理機器人加入群組 ==================
 async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """處理機器人自己被加入/移除群組"""
     try:
@@ -190,7 +174,6 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
         
         logger.info(f"🤖 機器人狀態變化: {chat.title} | {old_status} -> {new_status}")
         
-        # 機器人被加入群組
         if old_status in ["left", "kicked"] and new_status in ["member", "administrator"]:
             known_groups[chat.id] = {
                 "title": chat.title,
@@ -201,22 +184,19 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
             save_known_groups()
             logger.info(f"✅ 記錄新群組: {chat.title} (ID: {chat.id})")
             
-            # 發送歡迎消息
             try:
                 await context.bot.send_message(
                     chat.id,
-                    f"🤖 管理機器人已加入！\n"
-                    f"版本: {BOT_VERSION}\n\n"
-                    f"可用指令:\n"
+                    f"🤖 管理機器人已加入！版本: {BOT_VERSION}\n\n"
+                    f"📋 可用指令:\n"
                     f"/start - 查看幫助\n"
                     f"/banme - 自願禁言2分鐘\n\n"
-                    f"⚠️ 請確保機器人有「限制成員」管理員權限！",
+                    f"⚠️ 請設置機器人為管理員並開啟「限制成員」權限！",
                     parse_mode="HTML"
                 )
             except:
                 pass
         
-        # 機器人被移除
         elif new_status in ["left", "kicked"]:
             if chat.id in known_groups:
                 del known_groups[chat.id]
@@ -226,7 +206,7 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"處理機器人狀態失敗: {e}")
 
-# ================== 處理新成員加入（自動驗證） ==================
+# ================== 處理新成員加入 ==================
 async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """處理普通成員加入"""
     try:
@@ -239,7 +219,6 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
         old_status = chat_member.old_chat_member.status
         new_status = chat_member.new_chat_member.status
         
-        # 確保群組被記錄
         if chat.id not in known_groups:
             known_groups[chat.id] = {
                 "title": chat.title,
@@ -249,11 +228,9 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
             }
             save_known_groups()
         
-        # 處理新成員加入
         if old_status in ["left", "kicked"] and new_status == "member":
-            logger.info(f"👤 新成員: {user.full_name} (@{user.username}) 加入 {chat.title}")
+            logger.info(f"👤 新成員: {user.full_name} 加入 {chat.title}")
             
-            # 獲取用戶簡介
             bio = ""
             try:
                 user_chat = await context.bot.get_chat(user.id)
@@ -261,7 +238,6 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except:
                 pass
             
-            # 檢測可疑內容
             is_suspicious = False
             reasons = []
             
@@ -276,7 +252,6 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if is_suspicious:
                 logger.info(f"⚠️ 可疑用戶: {user.id}, 原因: {reasons}")
                 
-                # 檢查權限
                 has_perms, perm_msg = await check_bot_permissions(context.bot, chat.id)
                 if not has_perms:
                     await context.bot.send_message(
@@ -286,17 +261,15 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     )
                     return
                 
-                # 禁言用戶（使用簡單版本）
                 try:
                     await context.bot.restrict_chat_member(
                         chat_id=chat.id,
                         user_id=user.id,
-                        permissions=simple_mute_permissions(),
+                        permissions=create_mute_permissions(),
                     )
                     
                     pending_verifications[user.id] = chat.id
                     
-                    # 發送驗證按鈕
                     keyboard = [[
                         InlineKeyboardButton(
                             "✅ 我是真人，點擊驗證",
@@ -306,8 +279,7 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     
                     await context.bot.send_message(
                         chat.id,
-                        f"⚠️ {user.mention_html()} 需要驗證（{', '.join(reasons)}）\n"
-                        f"點擊下方按鈕完成驗證",
+                        f"⚠️ {user.mention_html()} 需要驗證（{', '.join(reasons)}）",
                         reply_markup=InlineKeyboardMarkup(keyboard),
                         parse_mode="HTML"
                     )
@@ -316,11 +288,10 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     logger.error(f"禁言失敗: {e}")
             
             else:
-                # 正常用戶歡迎
                 try:
                     await context.bot.send_message(
                         chat.id,
-                        f"👋 歡迎 {user.mention_html()} 加入 {chat.title}！",
+                        f"👋 歡迎 {user.mention_html()} 加入！",
                         parse_mode="HTML"
                     )
                 except:
@@ -345,34 +316,30 @@ async def on_verify_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = int(query.data.split("_")[1])
         chat_id = query.message.chat_id
         
-        # 驗證用戶
         if query.from_user.id != user_id:
             await query.answer("這不是你的驗證按鈕！", show_alert=True)
             return
         
-        # 檢查是否在待驗證列表
         if pending_verifications.get(user_id) != chat_id:
             await query.edit_message_text("❌ 驗證已過期")
             return
         
-        # 解除禁言（使用簡單版本）
         try:
             await context.bot.restrict_chat_member(
                 chat_id=chat_id,
                 user_id=user_id,
-                permissions=simple_unmute_permissions(),
+                permissions=create_unmute_permissions(),
             )
             
-            # 移除待驗證
             pending_verifications.pop(user_id, None)
             
             await query.edit_message_text(
-                f"✅ {query.from_user.mention_html()} 驗證成功！歡迎～",
+                f"✅ {query.from_user.mention_html()} 驗證成功！",
                 parse_mode="HTML"
             )
             
         except Exception as e:
-            await query.edit_message_text("❌ 解除禁言失敗，請聯繫管理員")
+            await query.edit_message_text("❌ 解除禁言失敗")
             
     except Exception as e:
         logger.error(f"驗證處理失敗: {e}")
@@ -391,14 +358,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 📋 可用指令:
 /start - 查看幫助
-/help - 查看詳細幫助
-/banme - 自願禁言2分鐘 (僅群組)
-/list - 查看管理群組 (僅管理員私聊)
-
-🔧 配置檢查:
-1. ✅ 機器人運行中
-2. {'❌' if chat.type == 'group' else '✅'} /banme 僅群組可用
-3. {'✅' if user.id == OWNER_ID else '❌'} 管理員權限
+/help - 詳細幫助
+/banme - 自願禁言2分鐘
+/list - 查看管理群組
 
 📊 狀態:
 群組數: {len(known_groups)}
@@ -418,11 +380,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚠️ 注意:\n"
         "- 機器人需要管理員權限\n"
         "- 開啟「限制成員」權限\n"
-        "- 關閉「匿名管理員」\n\n"
-        "🔧 故障排除:\n"
-        "- 指令無反應: 在 @BotFather 設置 /setcommands\n"
-        "- 禁言失敗: 檢查機器人權限\n"
-        "- 無群組記錄: 重新邀請機器人入群",
+        "- 關閉「匿名管理員」",
         parse_mode="HTML"
     )
 
@@ -433,45 +391,39 @@ async def banme(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     logger.info(f"🔇 /banme: 用戶 {user.id} 在群組 {chat.id}")
     
-    # 檢查是否在群組
     if chat.type == "private":
-        await update.message.reply_text(
-            "❌ 此指令僅在群組中可用！\n"
-            "請在群聊中使用 /banme",
-            parse_mode="HTML"
-        )
+        await update.message.reply_text("❌ 此指令僅在群組中可用！")
         return
     
-    # 檢查權限
+    # 檢查用戶是否管理員
+    try:
+        user_member = await chat.get_member(user.id)
+        if user_member.status in ["administrator", "creator"]:
+            await update.message.reply_text("❌ 管理員不能使用此指令！")
+            return
+    except:
+        pass  # 如果檢查失敗，繼續執行
+    
+    # 檢查機器人權限
     has_perms, perm_msg = await check_bot_permissions(context.bot, chat.id)
     if not has_perms:
         await update.message.reply_text(
             f"❌ 權限檢查失敗！\n{perm_msg}\n\n"
-            "請確認:\n"
-            "1. 機器人是管理員\n"
-            "2. 有「限制成員」權限\n"
-            "3. 關閉「匿名管理員」",
+            "請確認機器人有「限制成員」權限。",
             parse_mode="HTML"
         )
         return
     
     try:
-        # 檢查用戶是否管理員
-        user_member = await chat.get_member(user.id)
-        if user_member.status in ["administrator", "creator"]:
-            await update.message.reply_text("❌ 管理員不能使用此指令！")
-            return
-        
-        # 執行禁言（使用簡單版本）
+        # 執行禁言
         await context.bot.restrict_chat_member(
             chat_id=chat.id,
             user_id=user.id,
-            permissions=simple_mute_permissions(),
+            permissions=create_mute_permissions(),
         )
         
         await update.message.reply_text(
-            f"🤐 {user.mention_html()} 已自願禁言 2 分鐘\n"
-            f"⏰ 時間到自動解除",
+            f"🤐 {user.mention_html()} 已自願禁言 2 分鐘",
             parse_mode="HTML"
         )
         
@@ -483,13 +435,9 @@ async def banme(update: Update, context: ContextTypes.DEFAULT_TYPE):
         error_msg = str(e).lower()
         
         if "not enough rights" in error_msg:
-            await update.message.reply_text(
-                "❌ 權限不足！請確保:\n"
-                "1. 機器人是管理員\n"
-                "2. 有「限制成員」權限\n"
-                "3. 用戶不是管理員",
-                parse_mode="HTML"
-            )
+            await update.message.reply_text("❌ 權限不足！請檢查機器人權限。")
+        elif "user is an administrator" in error_msg:
+            await update.message.reply_text("❌ 無法禁言管理員！")
         else:
             await update.message.reply_text(f"❌ 錯誤: {e}")
 
@@ -498,36 +446,23 @@ async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
     
-    # 檢查是否私聊
     if chat.type != "private":
         await update.message.reply_text("❌ 此指令僅在私聊中可用！")
         return
     
-    # 檢查是否管理員
     if user.id != OWNER_ID:
         await update.message.reply_text(f"❌ 僅管理員可用 (ID: {OWNER_ID})")
         return
     
     if not known_groups:
-        await update.message.reply_text(
-            "📭 沒有群組記錄\n\n"
-            "可能原因:\n"
-            "1. 機器人未加入群組\n"
-            "2. 重新啟動機器人後需要重新加入\n"
-            "3. 等待新成員觸發記錄\n\n"
-            "💡 解決方法:\n"
-            "重新邀請機器人加入群組"
-        )
+        await update.message.reply_text("📭 沒有群組記錄")
         return
     
-    # 生成群組列表
     groups_text = "📋 管理的群組:\n\n"
     for idx, (chat_id, info) in enumerate(known_groups.items(), 1):
         title = info.get('title', '未知群組')
         status = info.get('status', 'unknown')
-        groups_text += f"{idx}. {title}\n"
-        groups_text += f"   ID: `{chat_id}`\n"
-        groups_text += f"   狀態: {status}\n\n"
+        groups_text += f"{idx}. {title}\n   ID: `{chat_id}`\n\n"
     
     groups_text += f"總計: {len(known_groups)} 個群組"
     
@@ -537,23 +472,6 @@ async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """全局錯誤處理"""
     logger.error(f"錯誤: {context.error}", exc_info=True)
-    
-    if update and update.effective_message:
-        try:
-            error_str = str(context.error).lower()
-            
-            if "invalid token" in error_str:
-                msg = "❌ Token 無效！請檢查 BOT_TOKEN"
-            elif "not enough rights" in error_str:
-                msg = "❌ 權限不足！請檢查管理員權限"
-            elif "chat not found" in error_str:
-                msg = "❌ 找不到群組，機器人可能已被移除"
-            else:
-                msg = f"❌ 錯誤: {context.error}"
-            
-            await update.effective_message.reply_text(msg)
-        except:
-            pass
 
 # ================== 主程式 ==================
 def main():
@@ -565,71 +483,39 @@ def main():
         print("請執行: export BOT_TOKEN='你的Token'")
         return
     
-    # 檢查 Python 版本和庫版本
-    import sys
-    try:
-        import telegram
-        print(f"📦 python-telegram-bot 版本: {telegram.__version__}")
-        
-        # 測試 ChatPermissions
-        test_perm = ChatPermissions(can_send_messages=False)
-        print("✅ ChatPermissions 兼容性測試通過")
-        
-    except Exception as e:
-        print(f"⚠️ 庫版本警告: {e}")
-    
     # 加載群組數據
     load_known_groups()
     
     # 創建應用
     application = Application.builder().token(bot_token).build()
     
-    # 註冊處理器（重要順序）
-    
-    # 1. 指令處理器（最先）
+    # 註冊處理器
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("banme", banme))
     application.add_handler(CommandHandler("list", list_groups))
     
-    # 2. 按鈕回調
     application.add_handler(CallbackQueryHandler(on_verify_click))
     
-    # 3. 成員變化處理（機器人自己）
     application.add_handler(ChatMemberHandler(
         handle_my_chat_member, 
         ChatMemberHandler.MY_CHAT_MEMBER
     ))
     
-    # 4. 成員變化處理（其他用戶）
     application.add_handler(ChatMemberHandler(
         handle_chat_member,
         ChatMemberHandler.CHAT_MEMBER
     ))
     
-    # 錯誤處理
     application.add_error_handler(error_handler)
     
     # 啟動信息
     print(f"\n{'='*60}")
     print(f"🤖 Telegram Admin Bot {BOT_VERSION}")
-    print(f"🐍 Python 版本: {sys.version.split()[0]}")
     print(f"👤 Owner ID: {OWNER_ID}")
-    print(f"🔑 Token: {bot_token[:10]}...{bot_token[-10:]}")
     print(f"📊 已記錄群組: {len(known_groups)} 個")
     print(f"{'='*60}")
-    print("\n⚠️  必須完成的配置:")
-    print("1. 在 @BotFather 設置指令:")
-    print("   /setcommands → 選擇機器人 → 粘貼:")
-    print("   start - 查看狀態")
-    print("   help - 查看幫助")  
-    print("   banme - 自願禁言2分鐘")
-    print("   list - 查看群組列表")
-    print("\n2. 群組權限:")
-    print("   - 設為管理員")
-    print("   - 開啟「限制成員」")
-    print("   - 關閉「匿名管理員」")
-    print(f"\n{'='*60}\n")
+    print("\n✅ 機器人正在啟動...")
     
     # 啟動
     try:
