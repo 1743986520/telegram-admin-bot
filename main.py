@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 # === 從環境變量讀取 OWNER_ID ===
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-BOT_VERSION = "v4.1.0-fixed-welcome"
+BOT_VERSION = "v4.0.0-stealth-mode"
 
 # 數據存儲
 known_groups: Dict[int, Dict] = {}
@@ -130,7 +130,7 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
             }
             save_known_groups()
             logger.info(f"✅ 靜默加入群組: {chat.title} (ID: {chat.id})")
-            # 靜默模式：機器人加入時不發送任何消息
+            # 靜默模式：不發送任何歡迎消息
         
         elif new_status in ["left", "kicked"]:
             if chat.id in known_groups:
@@ -141,7 +141,7 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"處理機器人狀態失敗: {e}")
 
-# ================== 處理新成員加入（修正歡迎語） ==================
+# ================== 處理新成員加入（自動驗證） ==================
 async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """處理普通成員加入"""
     try:
@@ -163,11 +163,9 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
             }
             save_known_groups()
         
-        # 處理新成員加入（舊成員離開 -> 新成員）
         if old_status in ["left", "kicked"] and new_status == "member":
             logger.info(f"👤 新成員: {user.full_name} 加入 {chat.title}")
             
-            # 先檢查是否為可疑用戶
             bio = ""
             try:
                 user_chat = await context.bot.get_chat(user.id)
@@ -191,7 +189,7 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 
                 has_perms, perm_msg = await check_bot_permissions(context.bot, chat.id)
                 if not has_perms:
-                    return  # 權限不足，靜默處理
+                    return  # 靜默模式，不發送公開消息
                 
                 try:
                     await context.bot.restrict_chat_member(
@@ -219,28 +217,7 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 except Exception as e:
                     logger.error(f"禁言失敗: {e}")
             
-            else:
-                # 正常用戶：發送簡短歡迎語
-                try:
-                    username = user.first_name
-                    if user.last_name:
-                        username += f" {user.last_name}"
-                    
-                    welcome_message = (
-                        f"👋 歡迎 {user.mention_html()} 加入 {chat.title}，\n"
-                        f"請務必觀看置頂公告內容～"
-                    )
-                    
-                    await context.bot.send_message(
-                        chat.id,
-                        welcome_message,
-                        parse_mode="HTML"
-                    )
-                    
-                    logger.info(f"✅ 發送歡迎語給 {username}")
-                    
-                except Exception as e:
-                    logger.error(f"發送歡迎語失敗: {e}")
+            # 靜默模式：取消正常用戶的歡迎消息
                     
     except Exception as e:
         logger.error(f"處理成員失敗: {e}")
@@ -278,18 +255,13 @@ async def on_verify_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             pending_verifications.pop(user_id, None)
             
-            welcome_message = (
-                f"✅ {query.from_user.mention_html()} 驗證成功！\n"
-                f"歡迎加入 {query.message.chat.title}，請觀看置頂內容～"
-            )
-            
             await query.edit_message_text(
-                welcome_message,
+                f"✅ {query.from_user.mention_html()} 驗證成功",
                 parse_mode="HTML"
             )
             
         except Exception as e:
-            await query.edit_message_text("❌ 解除禁言失敗，請聯繫管理員")
+            await query.edit_message_text("❌ 解除禁言失敗")
             
     except Exception as e:
         logger.error(f"驗證處理失敗: {e}")
@@ -300,8 +272,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
     
+    # 檢查是否私聊且是管理員
     if chat.type != "private":
-        return  # 群組中不回應 /start
+        return  # 群組中不回應
     
     if user.id != OWNER_ID:
         await update.message.reply_text(
@@ -344,7 +317,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 隱形管理機器人幫助\n\n"
         "🤖 機器人特性:\n"
         "- 靜默加入群組，不發送歡迎消息\n"
-        "- 新成員加入發送簡短歡迎語\n"
         "- 自動檢測可疑新成員\n"
         "- 不接受非管理員私聊\n"
         "- 隱形管理模式\n\n"
@@ -387,7 +359,8 @@ async def banme(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 檢查機器人權限
     has_perms, perm_msg = await check_bot_permissions(context.bot, chat.id)
     if not has_perms:
-        return  # 隱形模式，不公開提示權限問題
+        # 隱形模式，不公開提示權限問題
+        return
     
     try:
         # 執行禁言（驚喜！）
@@ -403,7 +376,12 @@ async def banme(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🤫 {user.mention_html()} 觸發了神秘機關！請享受2分鐘靜音體驗",
             f"🔇 {user.mention_html()} 成功解鎖「禁言成就」！冷卻時間：2分鐘",
             f"⏳ {user.mention_html()} 的發言技能正在冷卻中...（2分鐘）",
-            f"🎁 {user.mention_html()} 打開了潘多拉魔盒！獲得2分鐘沉默 buff"
+            f"🎁 {user.mention_html()} 打開了潘多拉魔盒！獲得2分鐘沉默 buff",
+            f"✨ {user.mention_html()} 發現了彩蛋！獲得2分鐘禁言體驗券",
+            f"🎪 {user.mention_html()} 進入了馬戲團靜音區！表演時間：2分鐘",
+            f"🔒 {user.mention_html()} 觸發了沉默陷阱！解鎖時間：2分鐘後",
+            f"🎰 {user.mention_html()} 中了沉默大獎！領獎時間：2分鐘",
+            f"🚫 {user.mention_html()} 進入了禁言休息室！休息時間：2分鐘"
         ]
         
         response = random.choice(responses)
@@ -519,10 +497,10 @@ def main():
     print(f"{'='*60}")
     print("\n✅ 機器人正在靜默運行中...")
     print("💡 特點:")
-    print("- 機器人靜默加入群組，不發歡迎消息")
-    print("- 新成員加入發送簡短歡迎語")
+    print("- 靜默加入群組，不發歡迎消息")
     print("- 不接受非管理員私聊")
     print("- /banme 變成驚喜功能")
+    print("- 只記錄日誌，減少公開提示")
     
     # 啟動
     try:
