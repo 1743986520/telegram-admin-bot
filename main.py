@@ -383,7 +383,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 幫助信息\n\n"
         "1. /start - 查看狀態\n"
         "2. /help - 查看詳細幫助\n"
-        "3. /banme - 群組內自願禁言2分鐘\n"
+        "3. /banme - 驚喜\n"
         "4. /list - 管理員查看群組列表\n\n"
         "⚠️ 注意:\n"
         "- 機器人需要管理員權限\n"
@@ -431,7 +431,7 @@ async def banme(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         await update.message.reply_text(
-            f"🤐 {user.mention_html()} 已自願禁言 2 分鐘",
+            f"wow {user.mention_html()} 恭喜你發現彩蛋啦",
             parse_mode="HTML"
         )
         
