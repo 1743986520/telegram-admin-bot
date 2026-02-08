@@ -35,49 +35,46 @@ logger = logging.getLogger(__name__)
 
 # === 重要：必須修改這兩個值 ===
 OWNER_ID = 7807347685  # 改成你的 Telegram ID
-BOT_VERSION = "v3.2.1-fixed-permissions"
+BOT_VERSION = "v3.2.2-fixed-permissions"
 
 # 數據存儲
 known_groups: Dict[int, Dict] = {}
-pending_verifications: Dict[int, Dict] = {}  # 改為存儲更多信息
-user_original_permissions: Dict[Tuple[int, int], Dict] = {}  # 存儲用戶原始權限
+pending_verifications: Dict[int, Dict] = {}
+user_original_permissions: Dict[Tuple[int, int], Dict] = {}
+user_welcomed: Dict[Tuple[int, int], bool] = {}  # 記錄用戶是否已被歡迎
 
 # ================== 權限設定（完全兼容版） ==================
 def create_mute_permissions():
-    """創建禁言權限（兼容所有版本）"""
-    # 嘗試不同版本的參數組合
+    """創建禁言權限（只關閉發言權限）"""
     try:
-        # 嘗試最簡單的參數（最基本）
-        return ChatPermissions(can_send_messages=False)
+        return ChatPermissions(
+            can_send_messages=False,
+            can_send_media_messages=False,
+            can_send_polls=False,
+            can_send_other_messages=False,
+            can_add_web_page_previews=False,
+            # 保持其他權限不變
+            can_change_info=None,
+            can_invite_users=None,
+            can_pin_messages=None,
+            can_manage_topics=None,
+        )
     except Exception as e1:
-        logger.warning(f"簡單參數失敗: {e1}")
+        logger.warning(f"完整禁言參數失敗: {e1}")
         try:
-            # 嘗試舊版參數
-            return ChatPermissions(
-                can_send_messages=False,
-                can_send_media_messages=False,
-                can_send_polls=False,
-                can_send_other_messages=False,
-                can_add_web_page_previews=False,
-            )
+            return ChatPermissions(**{
+                'can_send_messages': False,
+                'can_send_media_messages': False,
+                'can_send_polls': False,
+                'can_send_other_messages': False,
+                'can_add_web_page_previews': False,
+            })
         except Exception as e2:
-            logger.warning(f"舊版參數失敗: {e2}")
-            # 最後嘗試：使用字典方式
-            try:
-                return ChatPermissions(**{
-                    'can_send_messages': False,
-                    'can_send_media_messages': False,
-                    'can_send_polls': False,
-                    'can_send_other_messages': False,
-                    'can_add_web_page_previews': False,
-                })
-            except Exception as e3:
-                logger.error(f"所有參數組合都失敗: {e3}")
-                # 返回最基礎的禁言
-                return ChatPermissions(can_send_messages=False)
+            logger.error(f"禁言權限創建失敗: {e2}")
+            return ChatPermissions(can_send_messages=False)
 
-def create_full_permissions():
-    """創建完整權限（所有都允許）"""
+def create_default_permissions():
+    """創建默認權限（新用戶默認權限）"""
     try:
         return ChatPermissions(
             can_send_messages=True,
@@ -91,7 +88,7 @@ def create_full_permissions():
             can_manage_topics=False,
         )
     except Exception as e:
-        logger.warning(f"完整權限創建失敗: {e}")
+        logger.warning(f"默認權限創建失敗: {e}")
         try:
             return ChatPermissions(**{
                 'can_send_messages': True,
@@ -101,43 +98,56 @@ def create_full_permissions():
                 'can_add_web_page_previews': True,
             })
         except Exception as e2:
-            logger.error(f"完整權限最終失敗: {e2}")
+            logger.error(f"默認權限最終失敗: {e2}")
             return ChatPermissions(can_send_messages=True)
 
 def save_permissions_to_dict(permissions: ChatPermissions) -> Dict:
     """將權限對象轉換為字典"""
     perm_dict = {}
-    if hasattr(permissions, '__dict__'):
-        perm_dict = permissions.__dict__.copy()
-    else:
-        # 嘗試獲取所有屬性
-        for attr in ['can_send_messages', 'can_send_media_messages', 
-                     'can_send_polls', 'can_send_other_messages',
-                     'can_add_web_page_previews', 'can_change_info',
-                     'can_invite_users', 'can_pin_messages',
-                     'can_manage_topics']:
-            if hasattr(permissions, attr):
-                perm_dict[attr] = getattr(permissions, attr)
+    # 常見的權限屬性
+    common_permissions = [
+        'can_send_messages', 'can_send_media_messages', 
+        'can_send_polls', 'can_send_other_messages',
+        'can_add_web_page_previews', 'can_change_info',
+        'can_invite_users', 'can_pin_messages',
+        'can_manage_topics', 'can_send_audios',
+        'can_send_documents', 'can_send_photos',
+        'can_send_videos', 'can_send_video_notes',
+        'can_send_voice_notes'
+    ]
+    
+    for attr in common_permissions:
+        if hasattr(permissions, attr):
+            perm_dict[attr] = getattr(permissions, attr)
+    
     return perm_dict
 
 def create_permissions_from_dict(perm_dict: Dict) -> ChatPermissions:
     """從字典創建權限對象"""
     try:
-        return ChatPermissions(**perm_dict)
+        # 過濾 None 值，使用默認值
+        filtered_dict = {}
+        for key, value in perm_dict.items():
+            if value is not None:
+                filtered_dict[key] = value
+        
+        return ChatPermissions(**filtered_dict)
     except Exception as e:
         logger.warning(f"從字典創建權限失敗: {e}")
-        # 嘗試使用部分參數
-        filtered_dict = {}
-        for key in ['can_send_messages', 'can_send_media_messages', 
-                   'can_send_polls', 'can_send_other_messages',
-                   'can_add_web_page_previews']:
-            if key in perm_dict:
-                filtered_dict[key] = perm_dict[key]
+        # 嘗試使用更少的參數
+        basic_keys = ['can_send_messages', 'can_send_media_messages', 
+                     'can_send_polls', 'can_send_other_messages',
+                     'can_add_web_page_previews']
+        basic_dict = {}
+        for key in basic_keys:
+            if key in perm_dict and perm_dict[key] is not None:
+                basic_dict[key] = perm_dict[key]
+        
         try:
-            return ChatPermissions(**filtered_dict)
+            return ChatPermissions(**basic_dict)
         except Exception as e2:
             logger.error(f"從字典創建權限最終失敗: {e2}")
-            return create_full_permissions()
+            return create_default_permissions()
 
 # ================== 工具函數 ==================
 def save_known_groups():
@@ -166,7 +176,6 @@ def load_known_groups():
 def save_user_permissions():
     """保存用戶權限數據"""
     try:
-        # 將元組key轉換為字符串
         perm_data = {}
         for (chat_id, user_id), perms in user_original_permissions.items():
             key = f"{chat_id}_{user_id}"
@@ -210,8 +219,12 @@ async def delayed_unmute(bot, chat_id: int, user_id: int, minutes: int):
             original_perms = user_original_permissions[key]
             permissions = create_permissions_from_dict(original_perms)
             logger.info(f"📋 恢復原始權限: 用戶 {user_id} 在群組 {chat_id}")
+            
+            # 清理存儲的權限
+            del user_original_permissions[key]
+            save_user_permissions()
         else:
-            permissions = create_full_permissions()
+            permissions = create_default_permissions()
             logger.info(f"📋 使用默認權限: 用戶 {user_id} 在群組 {chat_id}")
         
         await bot.restrict_chat_member(
@@ -239,14 +252,22 @@ async def check_bot_permissions(bot, chat_id: int) -> tuple[bool, str]:
     except Exception as e:
         return False, f"❌ 檢查權限失敗: {e}"
 
-async def send_welcome_message(bot, chat_id: int, user_id: int, user_name: str):
+async def send_welcome_message(bot, chat_id: int, user_id: int, user_name: str, force_send: bool = False):
     """發送歡迎消息"""
+    key = (chat_id, user_id)
+    
+    # 如果已經歡迎過且不是強制發送，則跳過
+    if not force_send and key in user_welcomed and user_welcomed[key]:
+        logger.info(f"⏭️ 用戶 {user_id} 已歡迎過，跳過")
+        return
+    
     try:
         await bot.send_message(
             chat_id,
             f"👋 歡迎 {user_name} 加入群組！",
             parse_mode="HTML"
         )
+        user_welcomed[key] = True
         logger.info(f"✅ 已發送歡迎消息給 {user_name} (ID: {user_id})")
     except Exception as e:
         logger.error(f"發送歡迎消息失敗: {e}")
@@ -274,8 +295,6 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
             }
             save_known_groups()
             logger.info(f"✅ 記錄新群組: {chat.title} (ID: {chat.id})")
-            
-            # 移除自我介紹消息，只保留日誌記錄
         
         elif new_status in ["left", "kicked"]:
             if chat.id in known_groups:
@@ -310,9 +329,6 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         if old_status in ["left", "kicked"] and new_status == "member":
             logger.info(f"👤 新成員: {user.full_name} (ID: {user.id}) 加入 {chat.title}")
-            
-            # 首先發送歡迎消息
-            await send_welcome_message(context.bot, chat.id, user.id, user.mention_html())
             
             # 檢查用戶簡介
             bio = ""
@@ -356,9 +372,19 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                             perm_dict = save_permissions_to_dict(user_member.permissions)
                             user_original_permissions[(chat.id, user.id)] = perm_dict
                             save_user_permissions()
-                            logger.info(f"💾 保存用戶 {user.id} 原始權限")
+                            logger.info(f"💾 保存用戶 {user.id} 原始權限: {perm_dict}")
+                        else:
+                            # 如果沒有權限信息，使用默認權限
+                            default_perms = save_permissions_to_dict(create_default_permissions())
+                            user_original_permissions[(chat.id, user.id)] = default_perms
+                            save_user_permissions()
+                            logger.info(f"💾 使用默認權限保存用戶 {user.id}")
                     except Exception as perm_error:
                         logger.warning(f"無法獲取用戶原始權限: {perm_error}")
+                        # 使用默認權限
+                        default_perms = save_permissions_to_dict(create_default_permissions())
+                        user_original_permissions[(chat.id, user.id)] = default_perms
+                        save_user_permissions()
                     
                     # 禁言用戶
                     await context.bot.restrict_chat_member(
@@ -372,7 +398,8 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         "chat_id": chat.id,
                         "user_name": user.mention_html(),
                         "reasons": reasons,
-                        "timestamp": time.time()
+                        "timestamp": time.time(),
+                        "needs_welcome": True  # 標記需要歡迎
                     }
                     
                     # 發送驗證按鈕
@@ -393,7 +420,15 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 except Exception as e:
                     logger.error(f"禁言失敗: {e}")
             
-            # 如果不可疑，已經發送過歡迎消息，不需要再次發送
+            else:
+                # 不可疑的用戶，立即發送歡迎消息
+                await send_welcome_message(
+                    context.bot, 
+                    chat.id, 
+                    user.id, 
+                    user.mention_html(),
+                    force_send=True
+                )
                     
     except Exception as e:
         logger.error(f"處理成員失敗: {e}")
@@ -437,13 +472,13 @@ async def on_verify_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if key in user_original_permissions:
                 original_perms = user_original_permissions[key]
                 permissions = create_permissions_from_dict(original_perms)
-                logger.info(f"📋 恢復用戶 {user_id} 原始權限")
+                logger.info(f"📋 恢復用戶 {user_id} 原始權限: {original_perms}")
                 
                 # 清理存儲的權限
                 del user_original_permissions[key]
                 save_user_permissions()
             else:
-                permissions = create_full_permissions()
+                permissions = create_default_permissions()
                 logger.info(f"📋 使用默認權限恢復用戶 {user_id}")
             
             await context.bot.restrict_chat_member(
@@ -455,13 +490,15 @@ async def on_verify_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # 移除待驗證記錄
             del pending_verifications[user_id]
             
-            # 發送歡迎消息（驗證通過後）
-            await send_welcome_message(
-                context.bot, 
-                chat_id, 
-                user_id, 
-                query.from_user.mention_html()
-            )
+            # 如果驗證信息中標記需要歡迎，則發送歡迎消息
+            if verify_info.get("needs_welcome", False):
+                await send_welcome_message(
+                    context.bot, 
+                    chat_id, 
+                    user_id, 
+                    query.from_user.mention_html(),
+                    force_send=True
+                )
             
             await query.edit_message_text(
                 f"✅ {query.from_user.mention_html()} 驗證成功！已恢復權限。",
@@ -553,9 +590,18 @@ async def banme(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 perm_dict = save_permissions_to_dict(user_member.permissions)
                 user_original_permissions[(chat.id, user.id)] = perm_dict
                 save_user_permissions()
-                logger.info(f"💾 保存用戶 {user.id} 原始權限（/banme）")
+                logger.info(f"💾 保存用戶 {user.id} 原始權限（/banme）: {perm_dict}")
+            else:
+                # 使用默認權限
+                default_perms = save_permissions_to_dict(create_default_permissions())
+                user_original_permissions[(chat.id, user.id)] = default_perms
+                save_user_permissions()
         except Exception as perm_error:
             logger.warning(f"無法獲取用戶原始權限: {perm_error}")
+            # 使用默認權限
+            default_perms = save_permissions_to_dict(create_default_permissions())
+            user_original_permissions[(chat.id, user.id)] = default_perms
+            save_user_permissions()
         
         # 執行禁言
         await context.bot.restrict_chat_member(
@@ -660,6 +706,7 @@ def main():
     print(f"📋 已保存用戶權限: {len(user_original_permissions)} 個")
     print(f"{'='*60}")
     print("\n✅ 機器人正在啟動...")
+    print("⚠️  注意: 確保只運行一個機器人實例，避免衝突錯誤")
     
     # 啟動
     try:
@@ -670,7 +717,7 @@ def main():
                 Update.CHAT_MEMBER,
                 Update.MY_CHAT_MEMBER,
             ],
-            drop_pending_updates=False,
+            drop_pending_updates=True,  # 改為 True 避免處理舊消息
         )
     except KeyboardInterrupt:
         print("\n👋 機器人已停止")
