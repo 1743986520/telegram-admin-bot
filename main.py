@@ -187,7 +187,10 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
             try:
                 await context.bot.send_message(
                     chat.id,
-                    f"🤖 管理機器人已加入！\n\n"
+                    f"🤖 管理機器人已加入！版本: {BOT_VERSION}\n\n"
+                    f"📋 可用指令:\n"
+                    f"/start - 查看幫助\n"
+                    f"/banme - 自願禁言2分鐘\n\n"
                     f"⚠️ 請設置機器人為管理員並開啟「限制成員」權限！",
                     parse_mode="HTML"
                 )
@@ -288,7 +291,7 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 try:
                     await context.bot.send_message(
                         chat.id,
-                        f"👋 歡迎 {user.mention_html()} 加入！\n\n看看置頂內容",
+                        f"👋 歡迎 {user.mention_html()} 加入！",
                         parse_mode="HTML"
                     )
                 except:
@@ -347,30 +350,33 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
     
-    # 禁用私聊
-    if chat.type == 'private':
-        await update.message.reply_text("❌ 此機器人僅在群組中使用")
-        return
-    
     response = f"""
+🤖 Telegram 管理機器人 {BOT_VERSION}
+
+👤 你的 ID: `{user.id}`
+💬 場景: {'私聊' if chat.type == 'private' else '群組'}
+
 📋 可用指令:
+/start - 查看幫助
+/help - 詳細幫助
 /banme - 自願禁言2分鐘
+/list - 查看管理群組
+
+📊 狀態:
+群組數: {len(known_groups)}
+待驗證: {len(pending_verifications)}
 """
     
     await update.message.reply_text(response, parse_mode="Markdown")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """處理 /help 指令"""
-    chat = update.effective_chat
-    
-    # 禁用私聊
-    if chat.type == 'private':
-        await update.message.reply_text("❌ 此機器人僅在群組中使用")
-        return
-    
     await update.message.reply_text(
         "📖 幫助信息\n\n"
-        "1. /banme - 群組內自願禁言2分鐘\n\n"
+        "1. /start - 查看狀態\n"
+        "2. /help - 查看詳細幫助\n"
+        "3. /banme - 群組內自願禁言2分鐘\n"
+        "4. /list - 管理員查看群組列表\n\n"
         "⚠️ 注意:\n"
         "- 機器人需要管理員權限\n"
         "- 開啟「限制成員」權限\n"
@@ -383,12 +389,11 @@ async def banme(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
     
-    # 禁用私聊
-    if chat.type == 'private':
+    logger.info(f"🔇 /banme: 用戶 {user.id} 在群組 {chat.id}")
+    
+    if chat.type == "private":
         await update.message.reply_text("❌ 此指令僅在群組中可用！")
         return
-    
-    logger.info(f"🔇 /banme: 用戶 {user.id} 在群組 {chat.id}")
     
     # 檢查用戶是否管理員
     try:
@@ -441,7 +446,6 @@ async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
     
-    # 禁用私聊
     if chat.type != "private":
         await update.message.reply_text("❌ 此指令僅在私聊中可用！")
         return
