@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 # === 重要：必須修改這兩個值 ===
 OWNER_ID = 7807347685  # 改成你的 Telegram ID
-BOT_VERSION = "v3.2.5-simple-mute-only"
+BOT_VERSION = "v3.3.0-full-permissions"
 
 # 數據存儲
 known_groups: Dict[int, Dict] = {}
@@ -44,27 +44,65 @@ user_welcomed: Dict[Tuple[int, int], bool] = {}
 
 # ================== 權限設定 ==================
 def create_simple_mute_permissions():
-    """創建簡單禁言權限 - 只關閉發言權限"""
+    """完全禁言：禁止所有消息類型和功能"""
     try:
         return ChatPermissions(
-            can_send_messages=False,  # 只關閉發言
-            # 其他權限不設置，讓Telegram保持原狀
+            # 基本消息權限
+            can_send_messages=False,
+            
+            # 媒體消息權限
+            can_send_audios=False,
+            can_send_documents=False,
+            can_send_photos=False,
+            can_send_videos=False,
+            can_send_video_notes=False,
+            can_send_voice_notes=False,
+            
+            # 其他功能權限
+            can_send_polls=False,
+            can_send_other_messages=False,  # 包含貼圖、GIF等
+            can_add_web_page_previews=False,  # 連結預覽
+            
+            # 群組管理權限
+            can_change_info=False,
+            can_invite_users=False,
+            can_pin_messages=False,
+            can_manage_topics=False
         )
     except Exception as e:
-        logger.error(f"簡單禁言權限創建失敗: {e}")
-        # 最簡單的版本
+        logger.error(f"完全禁言權限創建失敗: {e}")
+        # 降級方案：只禁止基本發言
         return ChatPermissions(can_send_messages=False)
 
 def create_simple_unmute_permissions():
-    """創建簡單解禁權限 - 只開啟發言權限"""
+    """完全解禁：恢復所有權限"""
     try:
         return ChatPermissions(
-            can_send_messages=True,  # 只開啟發言
-            # 其他權限不設置，讓Telegram保持原狀
+            # 基本消息權限
+            can_send_messages=True,
+            
+            # 媒體消息權限
+            can_send_audios=True,
+            can_send_documents=True,
+            can_send_photos=True,
+            can_send_videos=True,
+            can_send_video_notes=True,
+            can_send_voice_notes=True,
+            
+            # 其他功能權限
+            can_send_polls=True,              # 投票活動
+            can_send_other_messages=True,      # 貼圖和GIF
+            can_add_web_page_previews=True,    # 連結預覽
+            
+            # 群組管理權限（可根據需求調整）
+            can_change_info=False,              # 禁止修改群組資訊
+            can_invite_users=True,               # 允許邀請新用戶
+            can_pin_messages=False,              # 禁止置頂消息
+            can_manage_topics=False               # 禁止管理話題
         )
     except Exception as e:
-        logger.error(f"簡單解禁權限創建失敗: {e}")
-        # 最簡單的版本
+        logger.error(f"完全解禁權限創建失敗: {e}")
+        # 降級方案：只恢復基本發言
         return ChatPermissions(can_send_messages=True)
 
 # ================== 工具函數 ==================
@@ -95,7 +133,7 @@ async def delayed_unmute(bot, chat_id: int, user_id: int, minutes: int):
     """延遲解除禁言"""
     await asyncio.sleep(minutes * 60)
     try:
-        # 使用簡單解禁權限
+        # 使用完全解禁權限
         permissions = create_simple_unmute_permissions()
         
         await bot.restrict_chat_member(
@@ -237,7 +275,7 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     return
                 
                 try:
-                    # 簡單禁言（只關閉發言）
+                    # 完全禁言（禁止所有功能）
                     await context.bot.restrict_chat_member(
                         chat_id=chat.id,
                         user_id=user.id,
@@ -318,7 +356,7 @@ async def on_verify_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         try:
-            # 簡單解禁（只開啟發言）
+            # 完全解禁（恢復所有權限）
             permissions = create_simple_unmute_permissions()
             
             await context.bot.restrict_chat_member(
@@ -341,7 +379,7 @@ async def on_verify_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             
             await query.edit_message_text(
-                f"✅ {query.from_user.mention_html()} 驗證成功！已恢復發言權限。",
+                f"✅ {query.from_user.mention_html()} 驗證成功！已恢復所有權限。",
                 parse_mode="HTML"
             )
             
@@ -373,6 +411,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📊 狀態:
 群組數: {len(known_groups)}
 待驗證: {len(pending_verifications)}
+
+🔧 當前權限設定:
+✅ 貼圖和 GIF
+✅ 媒體文件
+✅ 投票活動
+✅ 連結預覽
+✅ 邀請用戶
+✅ 發送消息
 """
     
     await update.message.reply_text(response, parse_mode="Markdown")
@@ -388,7 +434,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚠️ 注意:\n"
         "- 機器人需要管理員權限\n"
         "- 開啟「限制成員」權限\n"
-        "- 關閉「匿名管理員」",
+        "- 關閉「匿名管理員」\n\n"
+        "✨ 完整權限支持:\n"
+        "• 貼圖和 GIF\n"
+        "• 媒體文件\n"
+        "• 投票活動\n"
+        "• 連結預覽\n"
+        "• 邀請用戶\n"
+        "• 發送消息",
         parse_mode="HTML"
     )
 
@@ -423,7 +476,7 @@ async def banme(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        # 簡單禁言（只關閉發言）
+        # 完全禁言（禁止所有功能）
         await context.bot.restrict_chat_member(
             chat_id=chat.id,
             user_id=user.id,
@@ -525,10 +578,14 @@ def main():
     print(f"{'='*60}")
     print("\n✅ 機器人正在啟動...")
     print("⚠️  注意: 確保只運行一個機器人實例")
-    print("\n權限設置: 簡單模式")
-    print("禁言時: 只關閉發言權限")
-    print("解禁時: 只開啟發言權限")
-    print("其他權限: 保持原狀")
+    print("\n🔧 權限設定: 完整模式")
+    print("✅ 貼圖和 GIF")
+    print("✅ 媒體文件")
+    print("✅ 投票活動")
+    print("✅ 連結預覽")
+    print("✅ 邀請用戶")
+    print("✅ 發送消息")
+    print("❌ 群組管理權限（資訊、置頂、話題）")
     
     # 啟動
     try:
