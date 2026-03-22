@@ -604,7 +604,7 @@ async def check_referendum_state(context, chat_id: int, query=None):
             await update_referendum_message(context, chat_id, query)
 
 async def referendum_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """處理 /公投 指令"""
+    """處理 /vote 指令"""
     chat = update.effective_chat
     user = update.effective_user
 
@@ -690,7 +690,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /start - 查看幫助
 /help - 詳細幫助
 /banme - 自願禁言2分鐘
-/公投 - 發起全員禁言公投
+/vote - 發起全員禁言公投
 /list - 查看管理群組
 
 📊 狀態:
@@ -715,7 +715,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1. /start - 查看狀態\n"
         "2. /help - 查看詳細幫助\n"
         "3. /banme - 驚喜\n"
-        "4. /公投 - 發起全員禁言 5 分鐘公投\n"
+        "4. /vote - 發起全員禁言 5 分鐘公投\n"
         "5. /list - 管理員查看群組列表\n\n"
         "⚠️ 注意:\n"
         "- 機器人需要管理員權限\n"
@@ -841,7 +841,7 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("banme", banme))
     application.add_handler(CommandHandler("list", list_groups))
-    application.add_handler(CommandHandler("公投", referendum_command))
+    application.add_handler(CommandHandler("vote", referendum_command))
 
     application.add_handler(CallbackQueryHandler(on_referendum_vote, pattern=r"^ref_"))
     application.add_handler(CallbackQueryHandler(on_verify_click))
