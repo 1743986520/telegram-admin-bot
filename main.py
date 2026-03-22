@@ -41,6 +41,7 @@ BOT_VERSION = "v3.3.0-full-permissions"
 known_groups: Dict[int, Dict] = {}
 pending_verifications: Dict[int, Dict] = {}
 user_welcomed: Dict[Tuple[int, int], bool] = {}
+active_referendums: Dict[int, Dict] = {}  # chat_id -> referendum state
 
 # ================== 權限設定 ==================
 def create_simple_mute_permissions():
@@ -390,7 +391,290 @@ async def on_verify_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"驗證處理失敗: {e}")
 
-# ================== 指令處理 ==================
+# ================== 公投系統 ==================
+
+def build_referendum_text(chat_id: int) -> str:
+    """建立公投訊息文字"""
+    ref = active_referendums.get(chat_id)
+    if not ref:
+        return "公投已結束"
+
+    yes_count = len(ref["yes_votes"])
+    no_count = len(ref["no_votes"])
+    target = ref["current_target"]
+    state = ref["state"]
+
+    state_str = ""
+    if state == "observation":
+        leading_label = "✅ 支持" if ref["leading_option"] == "yes" else "❌ 反對"
+        state_str = f"\n⏳ <b>追平觀察期（30 秒）</b> — 領先方：{leading_label}"
+
+    round_num = (target - 3) // 2 + 1
+    round_str = f"第 {round_num} 輪" if round_num == 1 else f"第 {round_num} 輪（延長）"
+
+    return (
+        f"🗳️ <b>公投：全員禁言 5 分鐘</b>\n"
+        f"發起人：{ref['initiator_name']}\n"
+        f"📊 {round_str}｜目標票數：<b>{target} 票</b>{state_str}\n\n"
+        f"✅ 支持：<b>{yes_count}</b> 票\n"
+        f"❌ 反對：<b>{no_count}</b> 票\n\n"
+        f"每人限投一票，可隨時更換。"
+    )
+
+def build_referendum_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    """建立公投按鈕"""
+    ref = active_referendums.get(chat_id)
+    yes_count = len(ref["yes_votes"]) if ref else 0
+    no_count = len(ref["no_votes"]) if ref else 0
+    keyboard = [[
+        InlineKeyboardButton(f"✅ 支持 ({yes_count})", callback_data=f"ref_yes_{chat_id}"),
+        InlineKeyboardButton(f"❌ 反對 ({no_count})", callback_data=f"ref_no_{chat_id}"),
+    ]]
+    return InlineKeyboardMarkup(keyboard)
+
+async def update_referendum_message(context, chat_id: int, query=None):
+    """更新公投訊息"""
+    ref = active_referendums.get(chat_id)
+    if not ref:
+        return
+    text = build_referendum_text(chat_id)
+    keyboard = build_referendum_keyboard(chat_id)
+    try:
+        if query:
+            await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+        else:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=ref["message_id"],
+                text=text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        logger.warning(f"更新公投訊息失敗: {e}")
+
+async def observation_timer(context, chat_id: int):
+    """30 秒追平觀察期計時器"""
+    await asyncio.sleep(30)
+
+    ref = active_referendums.get(chat_id)
+    if not ref or ref["state"] != "observation":
+        return
+
+    yes_count = len(ref["yes_votes"])
+    no_count = len(ref["no_votes"])
+    target = ref["current_target"]
+    leading = ref["leading_option"]
+    trailing_count = no_count if leading == "yes" else yes_count
+
+    if trailing_count >= target:
+        # 追平了，進入下一輪（理論上應已被 callback 處理，這裡作為保底）
+        await advance_to_next_round(context, chat_id)
+    else:
+        # 未追平，領先方勝出
+        if leading == "yes":
+            await execute_group_mute(context, chat_id)
+        else:
+            await end_referendum(context, chat_id, "❌ 反對方勝出，公投遭否決！")
+
+async def advance_to_next_round(context, chat_id: int, query=None):
+    """進入下一輪延長投票"""
+    ref = active_referendums.get(chat_id)
+    if not ref:
+        return
+
+    ref["current_target"] += 2
+    ref["state"] = "voting"
+    ref["leading_option"] = None
+    new_target = ref["current_target"]
+
+    text = build_referendum_text(chat_id)
+    keyboard = build_referendum_keyboard(chat_id)
+    notice = f"\n\n🔄 <b>雙方追平！進入延長投票，新目標：{new_target} 票</b>"
+
+    try:
+        if query:
+            await query.edit_message_text(text + notice, reply_markup=keyboard, parse_mode="HTML")
+        else:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=ref["message_id"],
+                text=text + notice,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        logger.warning(f"更新延長投票訊息失敗: {e}")
+
+async def execute_group_mute(context, chat_id: int):
+    """執行公投通過：全員禁言 5 分鐘"""
+    ref = active_referendums.pop(chat_id, None)
+
+    try:
+        mute_perms = create_simple_mute_permissions()
+        await context.bot.set_chat_permissions(chat_id, mute_perms)
+
+        result_text = (
+            "✅ <b>公投通過！全員禁言 5 分鐘開始！</b>\n"
+            "⏱️ 5 分鐘後自動解除禁言。"
+        )
+        try:
+            if ref:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=ref["message_id"],
+                    text=result_text,
+                    parse_mode="HTML"
+                )
+        except Exception:
+            await context.bot.send_message(chat_id, result_text, parse_mode="HTML")
+
+        asyncio.create_task(delayed_group_unmute(context.bot, chat_id, 5))
+        logger.info(f"🔇 全員禁言已執行: 群組 {chat_id}")
+
+    except Exception as e:
+        logger.error(f"全員禁言失敗: {e}")
+        await context.bot.send_message(chat_id, f"❌ 執行禁言失敗: {e}")
+
+async def delayed_group_unmute(bot, chat_id: int, minutes: int):
+    """延遲解除全員禁言"""
+    await asyncio.sleep(minutes * 60)
+    try:
+        permissions = create_simple_unmute_permissions()
+        await bot.set_chat_permissions(chat_id, permissions)
+        await bot.send_message(chat_id, "🔔 <b>全員禁言已解除！</b>", parse_mode="HTML")
+        logger.info(f"✅ 全員禁言解除: 群組 {chat_id}")
+    except Exception as e:
+        logger.error(f"解除全員禁言失敗: {e}")
+
+async def end_referendum(context, chat_id: int, message: str):
+    """結束公投（否決）"""
+    ref = active_referendums.pop(chat_id, None)
+    try:
+        if ref:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=ref["message_id"],
+                text=f"🗳️ <b>公投結束</b>\n{message}",
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        logger.warning(f"結束公投訊息更新失敗: {e}")
+
+async def check_referendum_state(context, chat_id: int, query=None):
+    """每次投票後檢查公投狀態"""
+    ref = active_referendums.get(chat_id)
+    if not ref:
+        return
+
+    yes_count = len(ref["yes_votes"])
+    no_count = len(ref["no_votes"])
+    target = ref["current_target"]
+
+    if ref["state"] == "voting":
+        if yes_count >= target or no_count >= target:
+            # 某方率先達標，進入觀察期
+            leading = "yes" if yes_count >= target else "no"
+            ref["state"] = "observation"
+            ref["leading_option"] = leading
+            await update_referendum_message(context, chat_id, query)
+
+            # 取消舊計時器（如有）
+            old_task = ref.get("observation_task")
+            if old_task and not old_task.done():
+                old_task.cancel()
+
+            ref["observation_task"] = asyncio.create_task(
+                observation_timer(context, chat_id)
+            )
+        else:
+            await update_referendum_message(context, chat_id, query)
+
+    elif ref["state"] == "observation":
+        leading = ref["leading_option"]
+        trailing_count = no_count if leading == "yes" else yes_count
+
+        if trailing_count >= target:
+            # 追平！取消計時器，進入下一輪
+            old_task = ref.get("observation_task")
+            if old_task and not old_task.done():
+                old_task.cancel()
+            await advance_to_next_round(context, chat_id, query)
+        else:
+            await update_referendum_message(context, chat_id, query)
+
+async def referendum_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """處理 /公投 指令"""
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if chat.type == "private":
+        await update.message.reply_text("❌ 此指令僅在群組中可用！")
+        return
+
+    if chat.id in active_referendums:
+        await update.message.reply_text("⚠️ 目前已有進行中的公投，請等待結束後再發起！")
+        return
+
+    has_perms, perm_msg = await check_bot_permissions(context.bot, chat.id)
+    if not has_perms:
+        await update.message.reply_text(f"❌ 權限不足，無法執行公投！\n{perm_msg}")
+        return
+
+    active_referendums[chat.id] = {
+        "initiator_id": user.id,
+        "initiator_name": user.mention_html(),
+        "yes_votes": set(),
+        "no_votes": set(),
+        "current_target": 3,
+        "state": "voting",
+        "leading_option": None,
+        "observation_task": None,
+        "message_id": None,
+    }
+
+    text = build_referendum_text(chat.id)
+    keyboard = build_referendum_keyboard(chat.id)
+
+    msg = await context.bot.send_message(
+        chat.id, text, reply_markup=keyboard, parse_mode="HTML"
+    )
+    active_referendums[chat.id]["message_id"] = msg.message_id
+    logger.info(f"🗳️ 公投發起: 群組 {chat.id} 由用戶 {user.id}")
+
+async def on_referendum_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """處理公投投票按鈕"""
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split("_")  # ref_yes_CHATID or ref_no_CHATID
+    if len(parts) != 3:
+        return
+
+    _, option, chat_id_str = parts
+    chat_id = int(chat_id_str)
+    voter_id = query.from_user.id
+
+    if chat_id not in active_referendums:
+        await query.answer("此公投已結束", show_alert=True)
+        return
+
+    ref = active_referendums[chat_id]
+
+    # 更換票（先從兩邊移除再加入選擇方）
+    ref["yes_votes"].discard(voter_id)
+    ref["no_votes"].discard(voter_id)
+
+    if option == "yes":
+        ref["yes_votes"].add(voter_id)
+        await query.answer("✅ 已投支持票")
+    else:
+        ref["no_votes"].add(voter_id)
+        await query.answer("❌ 已投反對票")
+
+    await check_referendum_state(context, chat_id, query)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """處理 /start 指令"""
     user = update.effective_user
@@ -406,6 +690,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /start - 查看幫助
 /help - 詳細幫助
 /banme - 自願禁言2分鐘
+/公投 - 發起全員禁言公投
 /list - 查看管理群組
 
 📊 狀態:
@@ -430,7 +715,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1. /start - 查看狀態\n"
         "2. /help - 查看詳細幫助\n"
         "3. /banme - 驚喜\n"
-        "4. /list - 管理員查看群組列表\n\n"
+        "4. /公投 - 發起全員禁言 5 分鐘公投\n"
+        "5. /list - 管理員查看群組列表\n\n"
         "⚠️ 注意:\n"
         "- 機器人需要管理員權限\n"
         "- 開啟「限制成員」權限\n"
@@ -555,7 +841,9 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("banme", banme))
     application.add_handler(CommandHandler("list", list_groups))
-    
+    application.add_handler(CommandHandler("公投", referendum_command))
+
+    application.add_handler(CallbackQueryHandler(on_referendum_vote, pattern=r"^ref_"))
     application.add_handler(CallbackQueryHandler(on_verify_click))
     
     application.add_handler(ChatMemberHandler(
