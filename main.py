@@ -35,13 +35,19 @@ logger = logging.getLogger(__name__)
 
 # === 重要：必須修改這兩個值 ===
 OWNER_ID = 7807347685  # 改成你的 Telegram ID
-BOT_VERSION = "v3.3.0-full-permissions"
+BOT_VERSION = "v3.4.0-custom-proposal"
+
+# 行政頻道（自訂提案結果公告 + 置頂）
+ADMIN_GROUP_ID = -1003502034749
+ADMIN_GROUP_LINK = "https://t.me/diacg_administration"
 
 # 數據存儲
 known_groups: Dict[int, Dict] = {}
 pending_verifications: Dict[int, Dict] = {}
 user_welcomed: Dict[Tuple[int, int], bool] = {}
-active_referendums: Dict[int, Dict] = {}  # chat_id -> referendum state
+active_referendums: Dict[int, Dict] = {}        # chat_id -> 全員禁言公投狀態
+active_proposals: Dict[int, Dict] = {}          # chat_id -> 自訂提案狀態
+pending_proposal_setup: Dict[Tuple[int,int], Dict] = {}  # (chat_id, user_id) -> 待確認匿名設定
 
 # ================== 權限設定 ==================
 def create_simple_mute_permissions():
@@ -675,6 +681,382 @@ async def on_referendum_vote(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await check_referendum_state(context, chat_id, query)
 
 
+# ================== 自訂提案系統 ==================
+# 規則：
+#   - 任何成員均可發起，每群同時只能有一個自訂提案
+#   - 發起時可選擇是否匿名（匿名則隱藏發起人姓名）
+#   - 通過條件：同意票數率先達到 10 票
+#   - 即時否決條件：反對票數任何時刻超過同意票數（不等 = 超過才否決）
+#   - 無延長輪次，結果確立後立即結束
+#   - 無論通過或否決，均向行政頻道 ADMIN_GROUP_ID 發送公告並置頂
+#   - 逾時：提案發起後 30 分鐘無人達標則自動否決（防死票）
+
+PROPOSAL_TARGET = 10          # 通過所需同意票
+PROPOSAL_TIMEOUT_MIN = 30     # 提案逾時分鐘數
+
+
+def build_proposal_text(chat_id: int) -> str:
+    """建立自訂提案訊息文字"""
+    prop = active_proposals.get(chat_id)
+    if not prop:
+        return "提案已結束"
+
+    yes_count = len(prop["yes_votes"])
+    no_count  = len(prop["no_votes"])
+    initiator = "（匿名）" if prop["anonymous"] else prop["initiator_name"]
+    topic = prop["topic"]
+    elapsed = int((time.time() - prop["started_at"]) / 60)
+    remaining = max(0, PROPOSAL_TIMEOUT_MIN - elapsed)
+
+    warning = ""
+    if no_count > 0 and no_count >= yes_count:
+        warning = "\n⚠️ <b>注意：反對票已達或超過同意票！若反對票超過同意票，提案將立即否決。</b>"
+
+    return (
+        f"📋 <b>提案投票</b>\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"📌 <b>提案內容：</b>{topic}\n"
+        f"👤 <b>發起人：</b>{initiator}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"✅ 同意：<b>{yes_count}</b> 票　❌ 反對：<b>{no_count}</b> 票\n"
+        f"🎯 通過門檻：<b>{PROPOSAL_TARGET} 票同意</b>\n"
+        f"⏱️ 剩餘時間：約 <b>{remaining}</b> 分鐘{warning}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"每人限投一票，可隨時更換。\n"
+        f"⚠️ 若反對票數 <b>超過</b> 同意票數，提案即時否決。"
+    )
+
+
+def build_proposal_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    """建立自訂提案按鈕"""
+    prop = active_proposals.get(chat_id)
+    yes_count = len(prop["yes_votes"]) if prop else 0
+    no_count  = len(prop["no_votes"])  if prop else 0
+    keyboard = [[
+        InlineKeyboardButton(f"✅ 同意 ({yes_count})", callback_data=f"prop_yes_{chat_id}"),
+        InlineKeyboardButton(f"❌ 反對 ({no_count})",  callback_data=f"prop_no_{chat_id}"),
+    ]]
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def report_to_admin_group(bot, source_chat_title: str, source_chat_id: int,
+                                 topic: str, initiator_name: str, anonymous: bool,
+                                 yes_count: int, no_count: int, passed: bool, reason: str):
+    """向行政頻道發送提案結果公告並置頂"""
+    result_emoji = "✅ 通過" if passed else "❌ 否決"
+    initiator_str = "（匿名）" if anonymous else initiator_name
+    ts = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
+
+    text = (
+        f"📢 <b>提案公告</b>\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🏠 <b>群組：</b>{source_chat_title}（<code>{source_chat_id}</code>）\n"
+        f"📌 <b>提案：</b>{topic}\n"
+        f"👤 <b>發起人：</b>{initiator_str}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🗳️ <b>結果：{result_emoji}</b>\n"
+        f"✅ 同意：<b>{yes_count}</b> 票　❌ 反對：<b>{no_count}</b> 票\n"
+        f"📝 <b>原因：</b>{reason}\n"
+        f"🕐 <b>時間：</b>{ts}\n"
+        f"━━━━━━━━━━━━━━━"
+    )
+
+    try:
+        msg = await bot.send_message(ADMIN_GROUP_ID, text, parse_mode="HTML")
+        try:
+            await bot.pin_chat_message(
+                chat_id=ADMIN_GROUP_ID,
+                message_id=msg.message_id,
+                disable_notification=False,
+            )
+            logger.info(f"📌 已置頂行政頻道公告 msg_id={msg.message_id}")
+        except Exception as e:
+            logger.warning(f"置頂失敗（可能缺少置頂權限）: {e}")
+    except Exception as e:
+        logger.error(f"發送行政頻道公告失敗: {e}")
+
+
+async def proposal_timeout_task(context, chat_id: int):
+    """提案逾時自動否決"""
+    await asyncio.sleep(PROPOSAL_TIMEOUT_MIN * 60)
+
+    prop = active_proposals.get(chat_id)
+    if not prop:
+        return  # 已結束
+
+    yes_count = len(prop["yes_votes"])
+    no_count  = len(prop["no_votes"])
+    prop_copy = active_proposals.pop(chat_id, None)
+
+    timeout_text = (
+        f"🗳️ <b>提案結束（逾時）</b>\n"
+        f"📌 <b>提案：</b>{prop['topic']}\n"
+        f"❌ <b>結果：否決</b>（{PROPOSAL_TIMEOUT_MIN} 分鐘內未達 {PROPOSAL_TARGET} 票同意）\n"
+        f"✅ 同意 {yes_count} 票　❌ 反對 {no_count} 票"
+    )
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=prop["message_id"],
+            text=timeout_text,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.warning(f"更新逾時提案訊息失敗: {e}")
+
+    source_title = known_groups.get(chat_id, {}).get("title", str(chat_id))
+    await report_to_admin_group(
+        context.bot, source_title, chat_id,
+        prop["topic"], prop["initiator_name"], prop["anonymous"],
+        yes_count, no_count, passed=False,
+        reason=f"逾時 {PROPOSAL_TIMEOUT_MIN} 分鐘，未達通過門檻"
+    )
+
+
+async def check_proposal_state(context, chat_id: int, query=None):
+    """每次投票後檢查提案狀態"""
+    prop = active_proposals.get(chat_id)
+    if not prop:
+        return
+
+    yes_count = len(prop["yes_votes"])
+    no_count  = len(prop["no_votes"])
+
+    # ── 即時否決：反對票嚴格超過同意票 ──
+    if no_count > yes_count:
+        task = prop.get("timeout_task")
+        if task and not task.done():
+            task.cancel()
+        prop_data = active_proposals.pop(chat_id, None)
+
+        reject_text = (
+            f"🗳️ <b>提案結束</b>\n"
+            f"📌 <b>提案：</b>{prop_data['topic']}\n"
+            f"❌ <b>結果：否決</b>（反對票超過同意票）\n"
+            f"✅ 同意 {yes_count} 票　❌ 反對 {no_count} 票"
+        )
+        try:
+            if query:
+                await query.edit_message_text(reject_text, parse_mode="HTML")
+            else:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id, message_id=prop_data["message_id"],
+                    text=reject_text, parse_mode="HTML"
+                )
+        except Exception as e:
+            logger.warning(f"更新否決訊息失敗: {e}")
+
+        source_title = known_groups.get(chat_id, {}).get("title", str(chat_id))
+        await report_to_admin_group(
+            context.bot, source_title, chat_id,
+            prop_data["topic"], prop_data["initiator_name"], prop_data["anonymous"],
+            yes_count, no_count, passed=False,
+            reason="反對票數超過同意票數"
+        )
+        return
+
+    # ── 通過：同意票達 10 票 ──
+    if yes_count >= PROPOSAL_TARGET:
+        task = prop.get("timeout_task")
+        if task and not task.done():
+            task.cancel()
+        prop_data = active_proposals.pop(chat_id, None)
+
+        pass_text = (
+            f"🗳️ <b>提案結束</b>\n"
+            f"📌 <b>提案：</b>{prop_data['topic']}\n"
+            f"✅ <b>結果：通過</b>（達到 {PROPOSAL_TARGET} 票同意）\n"
+            f"✅ 同意 {yes_count} 票　❌ 反對 {no_count} 票"
+        )
+        try:
+            if query:
+                await query.edit_message_text(pass_text, parse_mode="HTML")
+            else:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id, message_id=prop_data["message_id"],
+                    text=pass_text, parse_mode="HTML"
+                )
+        except Exception as e:
+            logger.warning(f"更新通過訊息失敗: {e}")
+
+        source_title = known_groups.get(chat_id, {}).get("title", str(chat_id))
+        await report_to_admin_group(
+            context.bot, source_title, chat_id,
+            prop_data["topic"], prop_data["initiator_name"], prop_data["anonymous"],
+            yes_count, no_count, passed=True,
+            reason=f"同意票達到 {PROPOSAL_TARGET} 票門檻"
+        )
+        return
+
+    # ── 尚未決定，更新票數顯示 ──
+    text     = build_proposal_text(chat_id)
+    keyboard = build_proposal_keyboard(chat_id)
+    try:
+        if query:
+            await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+        else:
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=prop["message_id"],
+                text=text, reply_markup=keyboard, parse_mode="HTML"
+            )
+    except Exception as e:
+        logger.warning(f"更新提案訊息失敗: {e}")
+
+
+async def propose_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """處理 /propose <提案內容> 指令"""
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if chat.type == "private":
+        await update.message.reply_text("❌ 此指令僅在群組中可用！")
+        return
+
+    if chat.id in active_proposals:
+        await update.message.reply_text("⚠️ 目前已有進行中的提案，請等待結束後再發起！")
+        return
+
+    # 取得提案內容
+    topic = " ".join(context.args).strip() if context.args else ""
+    if not topic:
+        await update.message.reply_text(
+            "📋 <b>發起自訂提案</b>\n\n"
+            "用法：<code>/propose 你的提案內容</code>\n\n"
+            "例如：\n"
+            "<code>/propose 希望每周五設為自由討論日</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    if len(topic) > 200:
+        await update.message.reply_text("❌ 提案內容過長，請控制在 200 字以內！")
+        return
+
+    # 暫存草稿，等待匿名選擇
+    key = (chat.id, user.id)
+    pending_proposal_setup[key] = {
+        "topic": topic,
+        "chat_id": chat.id,
+        "chat_title": chat.title,
+        "initiator_id": user.id,
+        "initiator_name": user.mention_html(),
+    }
+
+    keyboard = [[
+        InlineKeyboardButton("👤 公開（顯示我的名字）", callback_data=f"propsetup_public_{chat.id}_{user.id}"),
+        InlineKeyboardButton("🕵️ 匿名（隱藏發起人）",   callback_data=f"propsetup_anon_{chat.id}_{user.id}"),
+    ]]
+    await update.message.reply_text(
+        f"📋 <b>提案預覽</b>\n\n"
+        f"<b>內容：</b>{topic}\n\n"
+        f"請選擇是否匿名發起：",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+
+
+async def on_proposal_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """處理匿名/公開選擇回調"""
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split("_")  # propsetup_public/anon_CHATID_USERID
+    if len(parts) != 4:
+        return
+
+    _, choice, chat_id_str, user_id_str = parts
+    chat_id = int(chat_id_str)
+    user_id = int(user_id_str)
+
+    if query.from_user.id != user_id:
+        await query.answer("這不是你的提案設定按鈕！", show_alert=True)
+        return
+
+    key = (chat_id, user_id)
+    if key not in pending_proposal_setup:
+        await query.edit_message_text("❌ 提案設定已過期，請重新使用 /propose 指令。")
+        return
+
+    draft = pending_proposal_setup.pop(key)
+
+    if chat_id in active_proposals:
+        await query.edit_message_text("⚠️ 其他人剛剛已發起提案，請等待結束後再試！")
+        return
+
+    anonymous = (choice == "anon")
+
+    active_proposals[chat_id] = {
+        "topic":          draft["topic"],
+        "initiator_id":   draft["initiator_id"],
+        "initiator_name": draft["initiator_name"],
+        "anonymous":      anonymous,
+        "yes_votes":      set(),
+        "no_votes":       set(),
+        "started_at":     time.time(),
+        "message_id":     None,
+        "timeout_task":   None,
+    }
+
+    # 刪除設定訊息，改發正式提案
+    try:
+        await query.delete_message()
+    except Exception:
+        pass
+
+    text     = build_proposal_text(chat_id)
+    keyboard = build_proposal_keyboard(chat_id)
+    msg = await context.bot.send_message(
+        chat_id, text, reply_markup=keyboard, parse_mode="HTML"
+    )
+    active_proposals[chat_id]["message_id"] = msg.message_id
+
+    # 啟動逾時計時器
+    active_proposals[chat_id]["timeout_task"] = asyncio.create_task(
+        proposal_timeout_task(context, chat_id)
+    )
+
+    anon_label = "匿名" if anonymous else "公開"
+    logger.info(f"📋 自訂提案發起 [{anon_label}]: 群組 {chat_id}，內容：{draft['topic'][:50]}")
+
+
+async def on_proposal_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """處理提案投票按鈕"""
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split("_")  # prop_yes_CHATID or prop_no_CHATID
+    if len(parts) != 3:
+        return
+
+    _, option, chat_id_str = parts
+    chat_id  = int(chat_id_str)
+    voter_id = query.from_user.id
+
+    if chat_id not in active_proposals:
+        await query.answer("此提案已結束", show_alert=True)
+        return
+
+    prop = active_proposals[chat_id]
+
+    # 發起人不可投票（防止自投）
+    if voter_id == prop["initiator_id"] and not prop["anonymous"]:
+        await query.answer("⚠️ 發起人不可為自己的提案投票！", show_alert=True)
+        return
+
+    # 更換票
+    prop["yes_votes"].discard(voter_id)
+    prop["no_votes"].discard(voter_id)
+
+    if option == "yes":
+        prop["yes_votes"].add(voter_id)
+        await query.answer("✅ 已投同意票")
+    else:
+        prop["no_votes"].add(voter_id)
+        await query.answer("❌ 已投反對票")
+
+    await check_proposal_state(context, chat_id, query)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """處理 /start 指令"""
     user = update.effective_user
@@ -691,6 +1073,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /help - 詳細幫助
 /banme - 自願禁言2分鐘
 /vote - 發起全員禁言公投
+/propose <內容> - 發起自訂提案
 /list - 查看管理群組
 
 📊 狀態:
@@ -716,7 +1099,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "2. /help - 查看詳細幫助\n"
         "3. /banme - 驚喜\n"
         "4. /vote - 發起全員禁言 5 分鐘公投\n"
-        "5. /list - 管理員查看群組列表\n\n"
+        "5. /propose &lt;內容&gt; - 發起自訂提案\n"
+        "6. /list - 管理員查看群組列表\n\n"
+        "📋 <b>自訂提案規則：</b>\n"
+        "• 任何成員均可發起，可選擇匿名或公開\n"
+        "• 需要 <b>10 票同意</b> 方可通過\n"
+        "• 反對票數一旦<b>超過</b>同意票數，提案即時否決\n"
+        "• 30 分鐘內未達標自動否決\n"
+        "• 結果將公告至行政頻道並置頂\n\n"
         "⚠️ 注意:\n"
         "- 機器人需要管理員權限\n"
         "- 開啟「限制成員」權限\n"
@@ -842,7 +1232,10 @@ def main():
     application.add_handler(CommandHandler("banme", banme))
     application.add_handler(CommandHandler("list", list_groups))
     application.add_handler(CommandHandler("vote", referendum_command))
+    application.add_handler(CommandHandler("propose", propose_command))
 
+    application.add_handler(CallbackQueryHandler(on_proposal_setup,  pattern=r"^propsetup_"))
+    application.add_handler(CallbackQueryHandler(on_proposal_vote,   pattern=r"^prop_"))
     application.add_handler(CallbackQueryHandler(on_referendum_vote, pattern=r"^ref_"))
     application.add_handler(CallbackQueryHandler(on_verify_click))
     
