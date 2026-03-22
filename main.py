@@ -709,8 +709,9 @@ def build_proposal_text(chat_id: int) -> str:
     remaining = max(0, PROPOSAL_TIMEOUT_MIN - elapsed)
 
     warning = ""
-    if no_count > 0 and no_count >= yes_count:
-        warning = "\n⚠️ <b>注意：反對票已達或超過同意票！若反對票超過同意票，提案將立即否決。</b>"
+    if no_count > 0 and (yes_count - no_count) <= 5:
+        gap = yes_count - no_count
+        warning = f"\n⚠️ <b>注意：反對票距否決門檻還差 {max(0, 5 - (no_count - yes_count) if no_count > yes_count else 5 + gap)} 票！（反對超過同意 5 票即否決）</b>"
 
     return (
         f"📋 <b>提案投票</b>\n"
@@ -723,7 +724,7 @@ def build_proposal_text(chat_id: int) -> str:
         f"⏱️ 剩餘時間：約 <b>{remaining}</b> 分鐘{warning}\n"
         f"━━━━━━━━━━━━━━━\n"
         f"每人限投一票，可隨時更換。\n"
-        f"⚠️ 若反對票數 <b>超過</b> 同意票數，提案即時否決。"
+        f"⚠️ 若反對票數超過同意票數 <b>5 票以上</b>，提案即時否決。"
     )
 
 
@@ -822,8 +823,8 @@ async def check_proposal_state(context, chat_id: int, query=None):
     yes_count = len(prop["yes_votes"])
     no_count  = len(prop["no_votes"])
 
-    # ── 即時否決：反對票嚴格超過同意票 ──
-    if no_count > yes_count:
+    # ── 即時否決：反對票超過同意票 5 票以上 ──
+    if no_count >= yes_count + 5:
         task = prop.get("timeout_task")
         if task and not task.done():
             task.cancel()
@@ -832,7 +833,7 @@ async def check_proposal_state(context, chat_id: int, query=None):
         reject_text = (
             f"🗳️ <b>提案結束</b>\n"
             f"📌 <b>提案：</b>{prop_data['topic']}\n"
-            f"❌ <b>結果：否決</b>（反對票超過同意票）\n"
+            f"❌ <b>結果：否決</b>（反對票超過同意票 5 票以上）\n"
             f"✅ 同意 {yes_count} 票　❌ 反對 {no_count} 票"
         )
         try:
@@ -851,7 +852,7 @@ async def check_proposal_state(context, chat_id: int, query=None):
             context.bot, source_title, chat_id,
             prop_data["topic"], prop_data["initiator_name"], prop_data["anonymous"],
             yes_count, no_count, passed=False,
-            reason="反對票數超過同意票數"
+            reason="反對票數超過同意票數 5 票以上"
         )
         return
 
