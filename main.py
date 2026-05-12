@@ -4,6 +4,7 @@ import asyncio
 import time
 from typing import Optional, Dict, Tuple
 import logging
+from ad_detector import detect_ad
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -1206,6 +1207,151 @@ async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(groups_text, parse_mode="Markdown")
 
+
+# ================== 廣告偵測 ==================
+
+async def get_all_admins(bot, chat_id: int) -> list:
+    """取得群組所有管理員列表"""
+    try:
+        admins = await bot.get_chat_administrators(chat_id)
+        return [a.user for a in admins if not a.user.is_bot]
+    except Exception as e:
+        logger.error(f"取得管理員列表失敗: {e}")
+        return []
+
+async def handle_message_ad_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """偵測訊息是否為廣告，是則禁言並通知管理員"""
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not message or not user or not message.text:
+        return
+    if chat.type == "private":
+        return
+
+    # 管理員發的訊息不偵測
+    try:
+        member = await chat.get_member(user.id)
+        if member.status in ["administrator", "creator"]:
+            return
+    except Exception:
+        pass
+
+    is_ad, confidence, reason = detect_ad(message.text)
+    if not is_ad:
+        return
+
+    logger.info(f"廣告偵測: 用戶 {user.id} 在 {chat.id} | {reason} | 信心:{confidence:.2f}")
+
+    # 禁言該用戶
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id=chat.id,
+            user_id=user.id,
+            permissions=create_simple_mute_permissions(),
+        )
+    except Exception as e:
+        logger.error(f"廣告禁言失敗: {e}")
+        return
+
+    # 刪除廣告訊息
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    # 取得所有管理員並產生 @ 列表
+    admins = await get_all_admins(context.bot, chat.id)
+    admin_mentions = " ".join(
+        f'<a href="tg://user?id={a.id}">{a.full_name}</a>' for a in admins
+    )
+
+    notice = (
+        f"🚨 <b>廣告攔截</b>\n"
+        f"用戶：{user.mention_html()}\n"
+        f"原因：{reason}\n"
+        f"置信度：{confidence:.0%}\n\n"
+        f"已自動禁言，請管理員確認：\n{admin_mentions}"
+    )
+    await context.bot.send_message(chat.id, notice, parse_mode="HTML")
+
+
+# ================== /ban 指令 ==================
+
+async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理員用 /ban：禁言目標用戶（回覆訊息或附帶 user_id）"""
+    chat = update.effective_chat
+    user = update.effective_user
+    message = update.effective_message
+
+    if chat.type == "private":
+        await message.reply_text("❌ 此指令僅在群組中可用！")
+        return
+
+    # 確認發令者是管理員
+    try:
+        caller = await chat.get_member(user.id)
+        if caller.status not in ["administrator", "creator"]:
+            await message.reply_text("❌ 只有管理員才能使用此指令！")
+            return
+    except Exception:
+        await message.reply_text("❌ 無法確認你的權限。")
+        return
+
+    # 取得目標用戶：優先回覆對象，其次 /ban <user_id>
+    target_user = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+    elif context.args:
+        try:
+            target_id = int(context.args[0])
+            target_chat = await context.bot.get_chat(target_id)
+            class _FakeUser:
+                def __init__(self, c):
+                    self.id = c.id
+                    self.full_name = c.full_name or str(c.id)
+                def mention_html(self):
+                    return f'<a href="tg://user?id={self.id}">{self.full_name}</a>'
+            target_user = _FakeUser(target_chat)
+        except Exception:
+            await message.reply_text("❌ 無效的用戶 ID，或請直接回覆要禁言的訊息。")
+            return
+    else:
+        await message.reply_text(
+            "❌ 用法：\n"
+            "• 回覆某人訊息後輸入 /ban\n"
+            "• 或 /ban <user_id>"
+        )
+        return
+
+    # 不能禁言管理員
+    try:
+        target_member = await chat.get_member(target_user.id)
+        if target_member.status in ["administrator", "creator"]:
+            await message.reply_text("❌ 無法禁言管理員！")
+            return
+    except Exception:
+        pass
+
+    # 執行禁言
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id=chat.id,
+            user_id=target_user.id,
+            permissions=create_simple_mute_permissions(),
+        )
+    except Exception as e:
+        await message.reply_text(f"❌ 禁言失敗：{e}")
+        return
+
+    mention = target_user.mention_html() if callable(target_user.mention_html) else target_user.mention_html
+    await message.reply_text(
+        f"🔇 {mention} 已被禁言。",
+        parse_mode="HTML"
+    )
+    logger.info(f"/ban: 管理員 {user.id} 禁言用戶 {target_user.id} 於群組 {chat.id}")
+
 # ================== 錯誤處理 ==================
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """全局錯誤處理"""
@@ -1234,6 +1380,13 @@ def main():
     application.add_handler(CommandHandler("list", list_groups))
     application.add_handler(CommandHandler("vote", referendum_command))
     application.add_handler(CommandHandler("propose", propose_command))
+    application.add_handler(CommandHandler("ban", ban_command))
+
+    # 廣告偵測：監聽所有群組文字訊息
+    application.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND,
+        handle_message_ad_check
+    ))
 
     application.add_handler(CallbackQueryHandler(on_proposal_setup,  pattern=r"^propsetup_"))
     application.add_handler(CallbackQueryHandler(on_proposal_vote,   pattern=r"^prop_"))
