@@ -22,10 +22,30 @@ _CONFUSE_MAP = {
     "万＋": "万+",
 }
 
+# 明確列出所有零寬字元 Unicode 碼位
+_ZERO_WIDTH = {
+    "​",  # Zero Width Space
+    "‌",  # Zero Width Non-Joiner
+    "‍",  # Zero Width Joiner
+    "‎",  # Left-to-Right Mark
+    "‏",  # Right-to-Left Mark
+    "⁠",  # Word Joiner
+    "⁡",  # Function Application
+    "⁢",  # Invisible Times
+    "⁣",  # Invisible Separator
+    "⁤",  # Invisible Plus
+    "﻿",  # Zero Width No-Break Space (BOM)
+    "­",  # Soft Hyphen
+    "͏",  # Combining Grapheme Joiner
+}
+
 def clean_text(text: str) -> str:
     """移除零寬字元、統一全形、替換混淆詞"""
-    # 移除零寬字元
-    text = "".join(c for c in text if unicodedata.category(c) != "Cf")
+    # 移除所有零寬字元（明確清單 + Cf 類）
+    text = "".join(
+        c for c in text
+        if c not in _ZERO_WIDTH and unicodedata.category(c) != "Cf"
+    )
     # NFKC 正規化（全形→半形）
     text = unicodedata.normalize("NFKC", text)
     # 混淆詞替換
@@ -69,6 +89,27 @@ _RULES = [
     # 通用 @ 引流（附帶行動詞）
     (r"(速来|来|了解|私聊|联系).{0,10}@\w{3,}", "引流@帳號"),
     (r"看(简介|我).{0,5}@\w{3,}", "引流@帳號"),
+
+    # 洗U / USDT 灰產
+    (r"(洗\s*[Uu✓]|洗\s*钱).{0,20}(赚|空缺|团队)", "洗U灰產"),
+    (r"USDT\s*(搬砖|项目|转账).{0,20}(空缺|勤快|小白)", "洗U灰產"),
+    (r"(轻\s*灰\s*产|灰\s*产).{0,10}(跑通|项目|来)", "洗U灰產"),
+    (r"(免手续费|0\.1\s*TRX).{0,10}转\s*[Uu]", "洗U灰產"),
+
+    # 高仿鈔 / 非法收款
+    (r"高仿\s*钞.{0,10}(出货|检测|BC机)", "高仿鈔"),
+    (r"(微信|支付宝).{0,10}帮.{0,5}收\s*钱", "非法收款"),
+
+    # 遠程控制 / 監控工具
+    (r"(手机|电话|设备)\s*(远程\s*控制|监控|定位|追踪).{0,20}@\w+", "遠程控制廣告"),
+    (r"(远程\s*控制|远控|手机监控).{0,30}(免费测试|合作|私聊|联系)", "遠程控制廣告"),
+    (r"(远控|手机监控|远程监控|定位追踪).{0,20}@\w+", "遠程控制廣告"),
+    (r"(免费\s*试用|先.*?测试.*?再).{0,20}@\w+", "遠程控制廣告"),
+
+    # 帳號販售
+    (r"(一手|全球)\s*老号.{0,20}(白菜价|售后|包)", "帳號販售"),
+    (r"(掉号|留卡|复接).{0,10}(售后|俩个月)", "帳號販售"),
+    (r"(打粉|强拉|群发引流).{0,10}(必备|私信)", "帳號販售"),
 ]
 
 _COMPILED_RULES = [(re.compile(pattern, re.IGNORECASE), label) for pattern, label in _RULES]
@@ -97,7 +138,7 @@ def _ngrams(text: str, n: int = 3) -> set:
 # 預計算模板 n-gram
 _TEMPLATE_NGRAMS = [_ngrams(clean_text(t)) for t in AD_TEMPLATES]
 
-SIMILARITY_THRESHOLD = 0.30   # Jaccard 閾值（廣告通常有大量共同詞組）
+SIMILARITY_THRESHOLD = 0.35   # Jaccard 閾值（提高至 0.35 以降低誤封率）
 
 def jaccard_similarity(a: set, b: set) -> float:
     if not a or not b:
