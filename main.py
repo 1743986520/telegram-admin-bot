@@ -244,9 +244,12 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 "status": "unknown"
             }
             save_known_groups()
+
+        # DEBUG：記錄所有成員狀態變化
+        logger.info(f"📊 成員狀態變化: {user.full_name} | {old_status} → {new_status} | 群組: {chat.title}")
         
         # 成員離開
-        if new_status in ["left", "kicked"] and old_status == "member":
+        if new_status in ["left", "kicked"] and old_status in ["member", "administrator", "restricted"]:
             name = user.mention_html()
             await context.bot.send_message(
                 chat.id,
