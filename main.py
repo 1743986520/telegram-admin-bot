@@ -1233,6 +1233,55 @@ async def get_all_admins(bot, chat_id: int) -> list:
         logger.error(f"取得管理員列表失敗: {e}")
         return []
 
+# 廣告用戶名特徵：隨機字母數字、特定後綴
+import re as _re
+_AD_USERNAME_PATTERNS = [
+    _re.compile(r'^[a-z]{2,6}\d{4,}$', _re.I),          # abc12345
+    _re.compile(r'\d{6,}$'),                              # 結尾6位以上數字
+    _re.compile(r'(bot|vip|tg|ad|ads|kl|service)\d+', _re.I),  # 廣告常見後綴
+]
+
+_AD_BIO_KEYWORDS = [
+    "简介", "引流", "广告", "代发", "搬U", "搬砖", "洗U", "收米",
+    "日入", "月入", "一天", "兼职", "副业", "招募", "招人", "赚钱",
+    "按摩", "上门", "伴游", "学生妹", "小姐姐", "假钞", "USDT",
+    # 簡介樣本補充
+    "安全简单", "稳定", "小白", "进群链接", "t.me", "带你", "找我",
+    "保底", "无套路", "灰产", "搬黑U", "现结", "日结", "翻身",
+    "高收入", "高薪", "轻松赚", "无风险", "包带", "空缺", "速来",
+]
+
+# 用戶簡介快取（避免重複 API 呼叫）
+_bio_cache: dict = {}
+
+async def get_user_bio(bot, user_id: int) -> str:
+    """取得用戶簡介，帶快取"""
+    if user_id in _bio_cache:
+        return _bio_cache[user_id]
+    try:
+        chat = await bot.get_chat(user_id)
+        bio = chat.bio or ""
+        _bio_cache[user_id] = bio
+        return bio
+    except Exception:
+        return ""
+
+def check_username_suspicious(username: str) -> bool:
+    """檢查用戶名是否符合廣告帳號特徵"""
+    if not username:
+        return False
+    for pattern in _AD_USERNAME_PATTERNS:
+        if pattern.search(username):
+            return True
+    return False
+
+def check_bio_suspicious(bio: str) -> bool:
+    """檢查簡介是否含廣告關鍵詞"""
+    if not bio:
+        return False
+    bio_lower = bio.lower()
+    return any(kw in bio_lower for kw in _AD_BIO_KEYWORDS)
+
 async def handle_message_ad_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """偵測訊息是否為廣告，是則禁言並通知管理員"""
     message = update.effective_message
@@ -1253,8 +1302,21 @@ async def handle_message_ad_check(update: Update, context: ContextTypes.DEFAULT_
         pass
 
     is_ad, confidence, reason = detect_ad(message.text)
+
+    # 訊息本身不是廣告，但檢查用戶名和簡介
     if not is_ad:
-        return
+        username = user.username or ""
+        suspicious_username = check_username_suspicious(username)
+        bio = await get_user_bio(context.bot, user.id)
+        suspicious_bio = check_bio_suspicious(bio)
+
+        if suspicious_username and suspicious_bio:
+            # 兩項都可疑才觸發，避免誤封
+            is_ad = True
+            confidence = 0.65
+            reason = f"帳號特徵可疑（用戶名: @{username} + 簡介含廣告詞）"
+        elif not is_ad:
+            return
 
     logger.info(f"廣告偵測: 用戶 {user.id} 在 {chat.id} | {reason} | 信心:{confidence:.2f}")
 

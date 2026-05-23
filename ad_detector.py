@@ -4,6 +4,9 @@
 import re
 import unicodedata
 from typing import Tuple
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 from ad_templates import AD_TEMPLATES
 
 # ──────────────────────────────────────────────
@@ -26,6 +29,9 @@ _CONFUSE_MAP = {
     "减介": "简介",
     "简届": "简介",
     "兼届": "简介",
+    "简戒": "简介",
+    "简洁": "简介",
+    "简戎": "简介",
     "jian jie": "简介",
     "硷介": "简介",
     "筒介": "简介",
@@ -120,6 +126,10 @@ _RULES = [
     (r"(萝莉|初中|高中|学生|未成年).{0,10}(私密|福利|色情|群).{0,20}(t\.me|@\w+)", "未成年色情"),
     (r"(loli|萝莉|幼|小学生).{0,20}(群|私密|资源|福利)", "未成年色情"),
 
+    # 高仿鈔（短文本補充）
+    (r"(高仿|假|偽)\s*(钞|钱|币|幣).{0,10}(过|過|BC|验|驗|出货|出貨)", "假鈔廣告"),
+    (r"(飞机|飛機).{0,5}(老号|老號|批发|批發).{0,15}(白菜|价格|售后)", "帳號販售"),
+
     # 高仿鈔 / 非法收款（擴充）
     (r"(伪钞|假钞|假币).{0,20}(BC|验钞|极品).{0,20}(@\w+|变现|嫖|赌)", "偽鈔廣告"),
     (r"(代收|帮.*?收).{0,10}[0-9]+\s*万.{0,15}@\w+", "非法收款"),
@@ -202,11 +212,23 @@ _RULES = [
     (r"(NFT|nft).{0,15}(用户名|账号|礼物|典藏).{0,20}@\w+", "NFT販售"),
     (r"(典藏|稀有).{0,10}(礼物|用户名|nft).{0,20}@\w+", "NFT販售"),
 
+    # 外圍/色情服務
+    (r"(猛凿|外围|外圍).{0,15}(女神|小姐|妹子).{0,15}@\w+", "色情服務廣告"),
+    (r"(D罩杯|E罩杯|巨乳).{0,20}@\w+", "色情服務廣告"),
+
+    # 轉U通道
+    (r"(转U|轉U).{0,20}(通道|免手续费|TRX).{0,20}@\w+", "轉U通道"),
+    (r"群主.{0,10}(转U|洗U|搬U).{0,20}@\w+", "轉U通道"),
+
     # 遠程控制 / 監控工具
     (r"(手机|电话|设备)\s*(远程\s*控制|监控|定位|追踪).{0,20}@\w+", "遠程控制廣告"),
     (r"(远程\s*控制|远控|手机监控).{0,30}(免费测试|合作|私聊|联系)", "遠程控制廣告"),
     (r"(远控|手机监控|远程监控|定位追踪).{0,20}@\w+", "遠程控制廣告"),
     (r"(免费\s*试用|先.*?测试.*?再).{0,20}@\w+", "遠程控制廣告"),
+
+    # 社群帳號批發（ins/fb/twitter等）
+    (r"(一手|批发|批量).{0,10}(ins|fb|facebook|twitter|tiktok|youtube).{0,20}(@\w+|出售|价格)", "社群帳號販售"),
+    (r"(ins|fb|facebook).{0,15}(老号|账号|批发|一手).{0,15}(@\w+|出售)", "社群帳號販售"),
 
     # 帳號販售
     (r"(飞机号|TG号|telegram号).{0,20}(上线|定制|出售|批发).{0,20}@\w+", "帳號販售"),
@@ -230,32 +252,34 @@ def check_rules(text: str) -> Tuple[bool, list]:
 
 
 # ──────────────────────────────────────────────
-# L2：模板相似度（字符 n-gram Jaccard）
-# 不需要任何外部模型，純 Python，夠快
+# L2：TF-IDF 餘弦相似度（雙向量器）
+# 比 Jaccard 更能理解語義，支援改寫/換詞變體
 # ──────────────────────────────────────────────
 
-def _ngrams(text: str, n: int = 3) -> set:
-    """字元 n-gram 集合"""
-    text = text.lower()
-    return {text[i:i+n] for i in range(len(text) - n + 1)}
+SIMILARITY_THRESHOLD = 0.28
 
-# 預計算模板 n-gram
-_TEMPLATE_NGRAMS = [_ngrams(clean_text(t)) for t in AD_TEMPLATES]
+def _build_vectorizers():
+    corpus = [clean_text(t).lower() for t in AD_TEMPLATES]
+    v1 = TfidfVectorizer(analyzer='char', ngram_range=(2, 4), max_features=8000, sublinear_tf=True)
+    v2 = TfidfVectorizer(analyzer='char', ngram_range=(3, 6), max_features=8000, sublinear_tf=True)
+    m1 = v1.fit_transform(corpus)
+    m2 = v2.fit_transform(corpus)
+    return v1, m1, v2, m2
 
-SIMILARITY_THRESHOLD = 0.35   # Jaccard 閾值（提高至 0.35 以降低誤封率）
-
-def jaccard_similarity(a: set, b: set) -> float:
-    if not a or not b:
-        return 0.0
-    return len(a & b) / len(a | b)
+_v1, _m1, _v2, _m2 = _build_vectorizers()
 
 def check_similarity(text: str) -> Tuple[bool, float]:
-    """L2：與模板庫比較，返回 (是否超過閾值, 最高相似度)"""
-    ng = _ngrams(text)
-    if not ng:
+    """L2：TF-IDF 餘弦相似度，返回 (是否超過閾值, 最高相似度)"""
+    t = clean_text(text).lower()
+    if not t:
         return False, 0.0
-    best = max(jaccard_similarity(ng, tmpl) for tmpl in _TEMPLATE_NGRAMS)
-    return best >= SIMILARITY_THRESHOLD, round(best, 3)
+    try:
+        s1 = float(np.max(cosine_similarity(_v1.transform([t]), _m1)[0]))
+        s2 = float(np.max(cosine_similarity(_v2.transform([t]), _m2)[0]))
+        best = round(max(s1, s2), 3)
+    except Exception:
+        return False, 0.0
+    return best >= SIMILARITY_THRESHOLD, best
 
 
 # ──────────────────────────────────────────────
