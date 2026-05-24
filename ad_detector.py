@@ -262,7 +262,7 @@ def check_rules(text: str) -> Tuple[bool, list]:
 # 比 Jaccard 更能理解語義，支援改寫/換詞變體
 # ──────────────────────────────────────────────
 
-SIMILARITY_THRESHOLD = 0.28
+SIMILARITY_THRESHOLD = 0.42
 
 def _build_vectorizers():
     corpus = [clean_text(t).lower() for t in AD_TEMPLATES]
