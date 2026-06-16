@@ -1253,7 +1253,7 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         result = subprocess.run(
-            ["git", "pull"],
+            ["git", "pull", "origin", "main"],
             capture_output=True, text=True, timeout=30
         )
         output = result.stdout.strip()
@@ -1298,7 +1298,7 @@ async def updatead_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # 先 git pull 拉取最新代碼
         result = subprocess.run(
-            ["git", "pull"],
+            ["git", "pull", "origin", "main"],
             capture_output=True, text=True, timeout=30
         )
         output = result.stdout.strip()
