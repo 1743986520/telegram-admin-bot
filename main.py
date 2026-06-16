@@ -192,6 +192,16 @@ async def send_welcome_message(bot, chat_id: int, user_id: int, user_name: str, 
     except Exception as e:
         logger.error(f"發送歡迎消息失敗: {e}")
 
+
+async def _delete_after(message, seconds: int):
+    """延遲刪除訊息"""
+    await asyncio.sleep(seconds)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
 # ================== 處理機器人加入群組 ==================
 async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """處理機器人自己被加入/移除群組"""
@@ -1257,10 +1267,11 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if "Already up to date" in output:
-            await update.message.reply_text("✅ 已是最新版本，無需更新。")
+            msg = await update.message.reply_text("✅ 已是最新版本，無需更新。")
+            asyncio.create_task(_delete_after(msg, 20))
             return
 
-        await update.message.reply_text(
+        msg = await update.message.reply_text(
             f"✅ 更新成功！\n\n📤 {output}\n\n⏳ 機器人將在 3 秒後重啟...",
             parse_mode="HTML"
         )
@@ -1317,13 +1328,14 @@ async def updatead_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 統計模板數量
         template_count = len(_adt.AD_TEMPLATES)
 
-        await update.message.reply_text(
+        msg = await update.message.reply_text(
             f"✅ 廣告模板更新成功！\n\n"
             f"📤 {output}\n"
             f"📊 當前模板數量：{template_count} 條\n"
             f"🔄 模板已熱重載，無需重啟。",
             parse_mode="HTML"
         )
+        asyncio.create_task(_delete_after(msg, 20))
         logger.info(f"✅ 廣告模板已熱重載，共 {template_count} 條")
 
     except subprocess.TimeoutExpired:
@@ -1470,10 +1482,11 @@ async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     mention = target_user.mention_html() if callable(target_user.mention_html) else target_user.mention_html
-    await message.reply_text(
+    msg = await message.reply_text(
         f"🔇 {mention} 已被禁言。",
         parse_mode="HTML"
     )
+    asyncio.create_task(_delete_after(msg, 20))
     logger.info(f"/ban: 管理員 {user.id} 禁言用戶 {target_user.id} 於群組 {chat.id}")
 
 # ================== 錯誤處理 ==================
