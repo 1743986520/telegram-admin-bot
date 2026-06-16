@@ -1,5 +1,7 @@
 import os
 import re
+import sys
+import subprocess
 import asyncio
 import time
 from typing import Optional, Dict, Tuple
@@ -1091,6 +1093,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /vote - 發起全員禁言公投
 /propose <內容> - 發起自訂提案
 /list - 查看管理群組
+/ban - 管理員禁言用戶
+/update - 更新機器人代碼並重啟
+/updatead - 僅更新廣告模板（不重啟）
 
 📊 狀態:
 群組數: {len(known_groups)}
@@ -1116,7 +1121,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "3. /banme - 驚喜\n"
         "4. /vote - 發起全員禁言 5 分鐘公投\n"
         "5. /propose &lt;內容&gt; - 發起自訂提案\n"
-        "6. /list - 管理員查看群組列表\n\n"
+        "6. /list - 管理員查看群組列表\n"
+        "7. /ban - 管理員禁言用戶\n"
+        "8. /update - 更新機器人並重啟\n"
+        "9. /updatead - 僅更新廣告模板（不重啟）\n\n"
         "📋 <b>自訂提案規則：</b>\n"
         "• 任何成員均可發起，可選擇匿名或公開\n"
         "• 需要 <b>10 票同意</b> 方可通過\n"
@@ -1220,6 +1228,108 @@ async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     groups_text += f"總計: {len(known_groups)} 個群組"
     
     await update.message.reply_text(groups_text, parse_mode="Markdown")
+
+
+async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """處理 /update 指令：從 GitHub 拉取最新代碼並重啟機器人"""
+    user = update.effective_user
+    chat = update.effective_chat
+
+    if user.id != OWNER_ID:
+        await update.message.reply_text("❌ 僅管理員可用此指令！")
+        return
+
+    await update.message.reply_text("🔄 正在更新，請稍候...", parse_mode="HTML")
+
+    try:
+        result = subprocess.run(
+            ["git", "pull"],
+            capture_output=True, text=True, timeout=30
+        )
+        output = result.stdout.strip()
+        error = result.stderr.strip()
+
+        if result.returncode != 0:
+            await update.message.reply_text(
+                f"❌ 更新失敗\n\n stderr: {error}\n stdout: {output}",
+                parse_mode="HTML"
+            )
+            return
+
+        if "Already up to date" in output:
+            await update.message.reply_text("✅ 已是最新版本，無需更新。")
+            return
+
+        await update.message.reply_text(
+            f"✅ 更新成功！\n\n📤 {output}\n\n⏳ 機器人將在 3 秒後重啟...",
+            parse_mode="HTML"
+        )
+
+        # 延遲重啟
+        asyncio.get_event_loop().call_later(3, os.execv, sys.executable, sys.argv)
+
+    except subprocess.TimeoutExpired:
+        await update.message.reply_text("❌ 更新超時，請稍後再試。")
+    except Exception as e:
+        await update.message.reply_text(f"❌ 更新失敗：{e}", parse_mode="HTML")
+
+
+async def updatead_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """處理 /updatead 指令：從 GitHub 拉取最新代碼並熱重載廣告模板（不重啟機器人）"""
+    user = update.effective_user
+
+    if user.id != OWNER_ID:
+        await update.message.reply_text("❌ 僅管理員可用此指令！")
+        return
+
+    await update.message.reply_text("🔄 正在更新廣告模板，請稍候...", parse_mode="HTML")
+
+    try:
+        # 先 git pull 拉取最新代碼
+        result = subprocess.run(
+            ["git", "pull"],
+            capture_output=True, text=True, timeout=30
+        )
+        output = result.stdout.strip()
+        error = result.stderr.strip()
+
+        if result.returncode != 0:
+            await update.message.reply_text(
+                f"❌ git pull 失敗\n\n stderr: {error}\n stdout: {output}",
+                parse_mode="HTML"
+            )
+            return
+
+        # 熱重載：先 reload ad_templates，再 reload ad_detector（會自動重建 TF-IDF 向量器）
+        import importlib
+        import ad_templates as _adt
+        import ad_detector as _ad
+
+        importlib.reload(_adt)
+        importlib.reload(_ad)
+
+        # 更新 detect_ad 的引用（main.py 頂層 from ad_detector import detect_ad）
+        import main as _self
+        # 直接替換 detect_ad 函數引用
+        import sys
+        sys.modules[__name__].detect_ad = _ad.detect_ad
+
+        # 統計模板數量
+        template_count = len(_adt.AD_TEMPLATES)
+
+        await update.message.reply_text(
+            f"✅ 廣告模板更新成功！\n\n"
+            f"📤 {output}\n"
+            f"📊 當前模板數量：{template_count} 條\n"
+            f"🔄 模板已熱重載，無需重啟。",
+            parse_mode="HTML"
+        )
+        logger.info(f"✅ 廣告模板已熱重載，共 {template_count} 條")
+
+    except subprocess.TimeoutExpired:
+        await update.message.reply_text("❌ 更新超時，請稍後再試。")
+    except Exception as e:
+        await update.message.reply_text(f"❌ 更新廣告模板失敗：{e}", parse_mode="HTML")
 
 
 # ================== 廣告偵測 ==================
@@ -1395,6 +1505,8 @@ def main():
     application.add_handler(CommandHandler("vote", referendum_command))
     application.add_handler(CommandHandler("propose", propose_command))
     application.add_handler(CommandHandler("ban", ban_command))
+    application.add_handler(CommandHandler("update", update_command))
+    application.add_handler(CommandHandler("updatead", updatead_command))
 
     # 廣告偵測：監聽所有群組文字訊息
     application.add_handler(MessageHandler(
