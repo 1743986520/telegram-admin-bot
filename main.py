@@ -1249,7 +1249,7 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ 僅管理員可用此指令！")
         return
 
-    await update.message.reply_text("🔄 正在更新，請稍候...", parse_mode="HTML")
+    msg_wait = await update.message.reply_text("🔄 正在更新，請稍候...", parse_mode="HTML")
 
     try:
         result = subprocess.run(
@@ -1258,6 +1258,9 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         output = result.stdout.strip()
         error = result.stderr.strip()
+
+        # 刪除「請稍候」提示
+        asyncio.create_task(_delete_after(msg_wait, 0))
 
         if result.returncode != 0:
             await update.message.reply_text(
@@ -1293,7 +1296,7 @@ async def updatead_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ 僅管理員可用此指令！")
         return
 
-    await update.message.reply_text("🔄 正在更新廣告模板，請稍候...", parse_mode="HTML")
+    msg_wait = await update.message.reply_text("🔄 正在更新廣告模板，請稍候...", parse_mode="HTML")
 
     try:
         # 先 git pull 拉取最新代碼
@@ -1303,6 +1306,9 @@ async def updatead_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         output = result.stdout.strip()
         error = result.stderr.strip()
+
+        # 刪除「請稍候」提示
+        asyncio.create_task(_delete_after(msg_wait, 0))
 
         if result.returncode != 0:
             await update.message.reply_text(
