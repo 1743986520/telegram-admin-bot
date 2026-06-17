@@ -1279,8 +1279,20 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML"
         )
 
-        # 延遲重啟
-        asyncio.get_event_loop().call_later(3, os.execv, sys.executable, sys.argv)
+        # 重啟前同步刪除「請稍候」和結果訊息，避免重啟後遺留
+        await asyncio.sleep(2)
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        try:
+            await msg_wait.delete()
+        except Exception:
+            pass
+
+        # 再等1秒後重啟
+        await asyncio.sleep(1)
+        os.execv(sys.executable, sys.argv)
 
     except subprocess.TimeoutExpired:
         await update.message.reply_text("❌ 更新超時，請稍後再試。")
