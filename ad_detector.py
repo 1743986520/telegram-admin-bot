@@ -288,13 +288,20 @@ def check_similarity(text: str) -> Tuple[bool, float]:
     t = clean_text(text).lower()
     if not t:
         return False, 0.0
+    # 輸入文本過長時降低閾值（避免長文本匹配短模板導致虛高）
+    input_len = len(t)
+    adaptive_threshold = SIMILARITY_THRESHOLD
+    if input_len > 40:
+        adaptive_threshold = 0.72
+    elif input_len > 25:
+        adaptive_threshold = 0.60
     try:
         s1 = float(np.max(cosine_similarity(_v1.transform([t]), _m1)[0]))
         s2 = float(np.max(cosine_similarity(_v2.transform([t]), _m2)[0]))
         best = round(max(s1, s2), 3)
     except Exception:
         return False, 0.0
-    return best >= SIMILARITY_THRESHOLD, best
+    return best >= adaptive_threshold, best
 
 
 # ──────────────────────────────────────────────
