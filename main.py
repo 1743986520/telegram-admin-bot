@@ -1279,16 +1279,13 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML"
         )
 
-        # 重啟前同步刪除「請稍候」和結果訊息，避免重啟後遺留
+        # 重啟前同步刪除用戶的 /update 指令、「請稍候」和結果訊息，避免重啟後遺留
         await asyncio.sleep(2)
-        try:
-            await msg.delete()
-        except Exception:
-            pass
-        try:
-            await msg_wait.delete()
-        except Exception:
-            pass
+        for m in [update.message, msg, msg_wait]:
+            try:
+                await m.delete()
+            except Exception:
+                pass
 
         # 再等1秒後重啟
         await asyncio.sleep(1)
