@@ -1176,6 +1176,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /ban - 管理員禁言用戶
 /update - 更新機器人代碼並重啟
 /updatead - 僅更新廣告模板（不重啟）
+/settings - 查看本群功能開關
+/feature <名稱> <on|off> - 管理員修改功能開關
 
 📊 狀態:
 群組數: {len(known_groups)}
@@ -1204,7 +1206,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "6. /list - 管理員查看群組列表\n"
         "7. /ban - 管理員禁言用戶\n"
         "8. /update - 更新機器人並重啟\n"
-        "9. /updatead - 僅更新廣告模板（不重啟）\n\n"
+        "9. /updatead - 僅更新廣告模板（不重啟）\n"
+        "10. /settings - 查看本群功能開關\n"
+        "11. /feature &lt;名稱&gt; &lt;on|off&gt; - 管理員修改功能開關\n\n"
         "📋 <b>自訂提案規則：</b>\n"
         "• 任何成員均可發起，可選擇匿名或公開\n"
         "• 需要 <b>10 票同意</b> 方可通過\n"
