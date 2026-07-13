@@ -7,6 +7,13 @@ import time
 from typing import Optional, Dict, Tuple
 import logging
 from ad_detector import detect_ad
+from settings import (
+    DEFAULT_FEATURES,
+    FEATURE_LABELS,
+    feature_enabled,
+    get_group_features,
+    set_group_feature,
+)
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -133,11 +140,61 @@ def load_known_groups():
             import json
             known_groups = json.load(f)
             known_groups = {int(k): v for k, v in known_groups.items()}
+            for group in known_groups.values():
+                group["features"] = get_group_features(group)
     except FileNotFoundError:
         known_groups = {}
     except Exception as e:
         logger.error(f"加載群組數據失敗: {e}")
         known_groups = {}
+
+async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """顯示目前群組功能開關。"""
+    chat = update.effective_chat
+    if chat.type == "private":
+        await update.message.reply_text("❌ 此指令僅在群組中可用。")
+        return
+    features = get_group_features(known_groups.get(chat.id, {}))
+    lines = ["⚙️ <b>群組功能設定</b>"]
+    lines.extend(
+        f"{'✅' if enabled else '⛔'} <code>{name}</code>：{FEATURE_LABELS[name]}"
+        for name, enabled in features.items()
+    )
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def feature_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理員設定單一功能：/feature <name> <on|off>。"""
+    chat = update.effective_chat
+    user = update.effective_user
+    if chat.type == "private":
+        await update.message.reply_text("❌ 此指令僅在群組中可用。")
+        return
+    try:
+        member = await chat.get_member(user.id)
+        if member.status not in ["administrator", "creator"] and user.id != OWNER_ID:
+            await update.message.reply_text("❌ 只有群組管理員才能修改設定。")
+            return
+    except Exception:
+        await update.message.reply_text("❌ 無法確認你的管理員權限。")
+        return
+    if len(context.args) != 2:
+        await update.message.reply_text(
+            "用法：<code>/feature ad_detection off</code>\n"
+            "可用名稱：" + ", ".join(DEFAULT_FEATURES), parse_mode="HTML"
+        )
+        return
+    name, value = context.args[0].lower(), context.args[1].lower()
+    if name not in DEFAULT_FEATURES or value not in {"on", "off", "true", "false"}:
+        await update.message.reply_text("❌ 功能名稱或值無效，使用 /settings 查看可用名稱。")
+        return
+    known_groups.setdefault(chat.id, {"title": chat.title or str(chat.id), "status": "active"})
+    set_group_feature(known_groups, chat.id, name, value in {"on", "true"})
+    save_known_groups()
+    await update.message.reply_text(
+        f"✅ {FEATURE_LABELS[name]} 已{'啟用' if value in {'on', 'true'} else '停用'}。"
+    )
+
 
 async def delayed_unmute(bot, chat_id: int, user_id: int, minutes: int):
     """延遲解除禁言"""
@@ -174,6 +231,8 @@ async def check_bot_permissions(bot, chat_id: int) -> tuple[bool, str]:
 
 async def send_welcome_message(bot, chat_id: int, user_id: int, user_name: str, force_send: bool = False):
     """發送歡迎消息"""
+    if not feature_enabled(known_groups.get(chat_id, {}), "welcome"):
+        return
     key = (chat_id, user_id)
     
     # 如果已經歡迎過且不是強制發送，則跳過
@@ -262,6 +321,8 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         # 成員離開
         if new_status in ["left", "kicked"] and old_status in ["member", "administrator", "restricted"]:
+            if not feature_enabled(known_groups.get(chat.id, {}), "leave_notice"):
+                return
             name = user.mention_html()
             await context.bot.send_message(
                 chat.id,
@@ -276,12 +337,13 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
             
             # 檢查用戶簡介
             bio = ""
-            try:
-                user_chat = await context.bot.get_chat(user.id)
-                bio = user_chat.bio or ""
-                logger.info(f"📝 用戶 {user.id} 簡介: {bio[:50]}{'...' if len(bio) > 50 else ''}")
-            except Exception as e:
-                logger.warning(f"無法獲取用戶 {user.id} 簡介: {e}")
+            if feature_enabled(known_groups.get(chat.id, {}), "profile_check"):
+                try:
+                    user_chat = await context.bot.get_chat(user.id)
+                    bio = user_chat.bio or ""
+                    logger.info(f"📝 用戶 {user.id} 簡介: {bio[:50]}{'...' if len(bio) > 50 else ''}")
+                except Exception as e:
+                    logger.warning(f"無法獲取用戶 {user.id} 簡介: {e}")
             
             is_suspicious = False
             reasons = []
@@ -645,6 +707,10 @@ async def referendum_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("❌ 此指令僅在群組中可用！")
         return
 
+    if not feature_enabled(known_groups.get(chat.id, {}), "referendum"):
+        await update.message.reply_text("❌ 此群組已停用全員禁言公投。")
+        return
+
     if chat.id in active_referendums:
         await update.message.reply_text("⚠️ 目前已有進行中的公投，請等待結束後再發起！")
         return
@@ -940,6 +1006,10 @@ async def propose_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ 此指令僅在群組中可用！")
         return
 
+    if not feature_enabled(known_groups.get(chat.id, {}), "proposals"):
+        await update.message.reply_text("❌ 此群組已停用自訂提案。")
+        return
+
     if chat.id in active_proposals:
         await update.message.reply_text("⚠️ 目前已有進行中的提案，請等待結束後再發起！")
         return
@@ -1159,6 +1229,10 @@ async def banme(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """處理 /banme 指令"""
     chat = update.effective_chat
     user = update.effective_user
+    
+    if chat.type != "private" and not feature_enabled(known_groups.get(chat.id, {}), "banme"):
+        await update.message.reply_text("❌ 此群組已停用 /banme。")
+        return
     
     logger.info(f"🔇 /banme: 用戶 {user.id} 在群組 {chat.id}")
     
@@ -1380,6 +1454,8 @@ async def handle_message_ad_check(update: Update, context: ContextTypes.DEFAULT_
         return
     if chat.type == "private":
         return
+    if not feature_enabled(known_groups.get(chat.id, {}), "ad_detection"):
+        return
 
     # 管理員發的訊息不偵測
     try:
@@ -1396,21 +1472,25 @@ async def handle_message_ad_check(update: Update, context: ContextTypes.DEFAULT_
     logger.info(f"廣告偵測: 用戶 {user.id} 在 {chat.id} | {reason} | 信心:{confidence:.2f}")
 
     # 禁言該用戶
-    try:
-        await context.bot.restrict_chat_member(
-            chat_id=chat.id,
-            user_id=user.id,
-            permissions=create_simple_mute_permissions(),
-        )
-    except Exception as e:
-        logger.error(f"廣告禁言失敗: {e}")
-        return
+    if feature_enabled(known_groups.get(chat.id, {}), "ad_mute"):
+        try:
+            await context.bot.restrict_chat_member(
+                chat_id=chat.id,
+                user_id=user.id,
+                permissions=create_simple_mute_permissions(),
+            )
+        except Exception as e:
+            logger.error(f"廣告禁言失敗: {e}")
 
     # 刪除廣告訊息
-    try:
-        await message.delete()
-    except Exception:
-        pass
+    if feature_enabled(known_groups.get(chat.id, {}), "ad_delete"):
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+    if not feature_enabled(known_groups.get(chat.id, {}), "ad_notify_admins"):
+        return
 
     # 取得所有管理員並產生 @ 列表
     admins = await get_all_admins(context.bot, chat.id)
@@ -1438,6 +1518,10 @@ async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if chat.type == "private":
         await message.reply_text("❌ 此指令僅在群組中可用！")
+        return
+
+    if not feature_enabled(known_groups.get(chat.id, {}), "ban_command"):
+        await message.reply_text("❌ 此群組已停用 /ban。")
         return
 
     # 確認發令者是管理員
@@ -1530,6 +1614,8 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("banme", banme))
     application.add_handler(CommandHandler("list", list_groups))
+    application.add_handler(CommandHandler("settings", settings_command))
+    application.add_handler(CommandHandler("feature", feature_command))
     application.add_handler(CommandHandler("vote", referendum_command))
     application.add_handler(CommandHandler("propose", propose_command))
     application.add_handler(CommandHandler("ban", ban_command))

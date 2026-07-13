@@ -85,6 +85,8 @@ python main.py
 | `/banme` | 所有人 | 自願禁言 2 分鐘 |
 | `/propose` | 管理員 | 發起群組投票提案 |
 | `/list` | 管理員 | 查詢 Bot 管理的群組 |
+| `/settings` | 群組管理員 | 查看本群功能開關 |
+| `/feature <名稱> <on\|off>` | 群組管理員 | 修改本群功能開關 |
 
 ## 新增廣告範本
 
@@ -96,6 +98,24 @@ python main.py
 ```
 
 修改後重啟 Bot 即時生效，無需其他操作。
+
+## 群組功能開關
+
+設定會持久化到 `known_groups.json`，舊群組未記錄的項目預設為啟用。可用名稱如下：
+
+- `welcome`：入群歡迎
+- `leave_notice`：離群通知
+- `profile_check`：入群簡介檢測
+- `ad_detection`：訊息廣告檢測
+- `ad_delete`：廣告自動刪除
+- `ad_mute`：廣告自動禁言
+- `ad_notify_admins`：廣告通知管理員
+- `referendum`：`/vote` 全員禁言公投
+- `proposals`：`/propose` 自訂提案
+- `banme`：`/banme` 彩蛋禁言
+- `ban_command`：`/ban` 管理員禁言
+
+例如：`/feature ad_notify_admins off`。廣告偵測、刪除、禁言與通知是獨立開關，可按群組需求分開調整。
 
 ## 文件結構
 
