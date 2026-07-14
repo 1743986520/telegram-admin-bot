@@ -284,10 +284,28 @@ def check_rules(text: str) -> Tuple[bool, list]:
 # ──────────────────────────────────────────────
 
 SIMILARITY_THRESHOLD = 0.42
+# 極短訊息缺少足夠語境；僅靠模板相似度不得直接判為廣告。
+# 否則像「openai」這類單一品牌詞會因共享字元 n-gram 被誤封。
+MIN_SIMILARITY_TEXT_LENGTH = 8
 
 # 白樣本救援：L2 命中時，若最相似白樣本分數不低於廣告分數，視為誤判放行。
 # margin 讓白樣本需「明顯更像」才救援，避免白樣本反噬吞掉真廣告。
 WHITELIST_RESCUE_MARGIN = 0.0
+
+# 品牌名稱本身不是廣告；OpenAI/GPT 只有在出現訂閱、VCC、扣費等
+# 推廣語境時才允許 L2 模板相似度判定，避免「openai我肏你媽」這類
+# 普通聊天因共享字元 n-gram 被誤封。
+_BRAND_NAMES = re.compile(r"(?:openai|chatgpt|gpt)", re.IGNORECASE)
+_BRAND_AD_CONTEXT = re.compile(
+    r"(?:訂閱|订阅|續費|续费|拒付|拒絕|扣費|扣费|開卡|开卡|免卡|量大|"
+    r"虛擬信用卡|虚拟信用卡|虛擬卡|虚拟卡|vcc|信用卡|批發|批发|出售|接單|接单|"
+    r"解鎖|解锁|充值|代充|卡商|大卡量|subscription|renew|billing|card)",
+    re.IGNORECASE,
+)
+
+def _has_brand_ad_context(text: str) -> bool:
+    """品牌詞需搭配明確推廣語境，才可由 L2 判為廣告。"""
+    return not _BRAND_NAMES.search(text) or bool(_BRAND_AD_CONTEXT.search(text))
 
 def _build_vectorizers():
     # 基礎大庫 + 動態入庫的廣告樣本
@@ -327,6 +345,10 @@ def check_similarity(text: str) -> Tuple[bool, float]:
     """L2：TF-IDF 餘弦相似度，返回 (是否超過閾值, 最高相似度)"""
     t = clean_text(text).lower()
     if not t:
+        return False, 0.0
+    # 輸入文本過短時，單靠共享字元 n-gram 的相似度不具判斷力。
+    # 例如「openai」會和多個模板得到固定高分，但沒有廣告語境。
+    if len(t) < MIN_SIMILARITY_TEXT_LENGTH:
         return False, 0.0
     # 輸入文本過長時降低閾值（避免長文本匹配短模板導致虛高）
     input_len = len(t)
@@ -374,6 +396,9 @@ def detect_ad(raw_text: str) -> Tuple[bool, float, str]:
     # L2：模板相似度
     hit_sim, score = check_similarity(text)
     if hit_sim:
+        # 品牌詞沒有訂閱／金融卡等推廣上下文時，不使用模板相似度封鎖。
+        if not _has_brand_ad_context(text):
+            return False, 0.0, "品牌詞但無廣告語境，正常訊息"
         # 白樣本救援：僅作用於 L2（L1 明確廣告詞不救援）
         # 若最相似白樣本分數 ≥ 廣告分數，判定為誤封並放行
         t = clean_text(text).lower()
