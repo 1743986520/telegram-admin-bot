@@ -356,6 +356,8 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
             
             # 檢查用戶簡介
             bio = ""
+            is_suspicious = False
+            reasons = []
             if feature_enabled(known_groups.get(chat.id, {}), "profile_check"):
                 try:
                     user_chat = await context.bot.get_chat(user.id)
@@ -363,20 +365,31 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     logger.info(f"📝 用戶 {user.id} 簡介: {bio[:50]}{'...' if len(bio) > 50 else ''}")
                 except Exception as e:
                     logger.warning(f"無法獲取用戶 {user.id} 簡介: {e}")
-            
-            is_suspicious = False
-            reasons = []
-            
-            # 檢查 @ 標籤
-            if re.search(r"@\w+", bio, re.IGNORECASE):
-                is_suspicious = True
-                reasons.append("@標籤")
-            
-            # 檢查連結
-            if re.search(r"https?://|t\.me/", bio, re.IGNORECASE):
-                is_suspicious = True
-                reasons.append("網址/連結")
-            
+
+                # 檢查 @ 標籤
+                if re.search(r"@\w+", bio, re.IGNORECASE):
+                    is_suspicious = True
+                    reasons.append("@標籤")
+
+                # 檢查連結
+                if re.search(r"https?://|t\.me/", bio, re.IGNORECASE):
+                    is_suspicious = True
+                    reasons.append("網址/連結")
+
+                # 用戶名／暱稱／簡介直接對廣告模板庫掃描（L1 正則 + L2 TF-IDF 相似度）
+                profile_fields = (
+                    ("用戶名", f"@{user.username}" if user.username else ""),
+                    ("暱稱", user.full_name or ""),
+                    ("簡介", bio),
+                )
+                for field_label, field_text in profile_fields:
+                    if not field_text:
+                        continue
+                    hit, _score, hit_reason = detect_ad(field_text)
+                    if hit:
+                        is_suspicious = True
+                        reasons.append(f"{field_label}命中模板庫[{hit_reason}]")
+
             if is_suspicious:
                 logger.info(f"⚠️ 可疑用戶: {user.id}, 原因: {reasons}")
                 
@@ -1539,21 +1552,14 @@ def _dedupe_ad_samples():
     官方模板是基準；若動態樣本與官方模板在 NFKC/casefold/去空白符號後相同，
     保留官方版本並移除動態副本，避免匯入的樣本只和自己比較。
     """
-    import re
-    import unicodedata
-    from ad_samples import load_ad_samples, save_ad_samples
-    from ad_templates import AD_TEMPLATES
+    from ad_samples import load_ad_samples, save_ad_samples, normalize_key, official_template_keys
 
-    def key(text: str) -> str:
-        text = unicodedata.normalize("NFKC", text).casefold()
-        return re.sub(r"[\s\W_]+", "", text, flags=re.UNICODE)
-
-    official_keys = {normalized for sample in AD_TEMPLATES if (normalized := key(sample))}
+    official_keys = official_template_keys()
     samples = load_ad_samples()
     seen = set(official_keys)
     cleaned = []
     for sample in samples:
-        normalized = key(sample)
+        normalized = normalize_key(sample)
         if normalized and normalized not in seen:
             seen.add(normalized)
             cleaned.append(sample.strip())
@@ -1604,7 +1610,7 @@ async def addsample_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     added = add_ad_sample(text)
     if not added:
-        await update.message.reply_text("ℹ️ 此樣本已存在於廣告樣本庫，未重複加入。")
+        await update.message.reply_text("ℹ️ 此樣本已存在於廣告樣本庫或原生模板庫（正規化去重），未重複加入。")
         return
 
     try:
