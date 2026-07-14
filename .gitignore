@@ -2,4 +2,6 @@ __pycache__/
 *.py[cod]
 *.log
 known_groups.json
+custom_ad_samples.json
+whitelist_samples.json
 .env

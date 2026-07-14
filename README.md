@@ -4,7 +4,10 @@
 
 ## 功能特點
 
-- 🚫 **本地廣告攔截**：三層偵測（正則規則 + TF-IDF 語義相似度 + 模板庫），自動禁言並通知管理員
+- 🚫 **本地廣告攔截**：正則規則 + TF-IDF 語義相似度 + 廣告模板庫，自動禁言並通知管理員
+- 🧠 **動態廣告樣本庫**：可用 `/addsample` 將新廣告加入樣本庫，立即重建偵測器
+- 🛡️ **誤封白樣本庫**：可用 `/whitelist` 將誤判訊息加入非廣告樣本，協助降低相似度誤封
+- 📦 **樣本庫提取**：可用 `/exportsamples` 匯出廣告樣本與白樣本 JSON
 - 🔍 **帳號畫像偵測**：結合用戶名格式與簡介關鍵詞，識別廣告帳號
 - 🔇 **禁言指令**：`/ban` 管理員專用，回覆訊息或指定 ID 即可禁言
 - 👋 **成員離開通知**：成員退群自動發送告別訊息
@@ -87,6 +90,9 @@ python main.py
 | `/list` | 管理員 | 查詢 Bot 管理的群組 |
 | `/settings` | 群組管理員 | 查看本群功能開關 |
 | `/feature <名稱> <on\|off>` | 群組管理員 | 修改本群功能開關 |
+| `/addsample` | Bot Owner | 回覆廣告訊息加入動態廣告樣本庫 |
+| `/whitelist` | Bot Owner | 回覆誤封訊息加入非廣告白樣本庫 |
+| `/exportsamples` | Bot Owner | 匯出動態廣告樣本與白樣本 JSON |
 
 ## 新增廣告範本
 
@@ -123,7 +129,10 @@ python main.py
 telegram-admin-bot/
 ├── main.py           # 主程式、指令與事件處理
 ├── ad_detector.py    # 廣告偵測核心（L1 + L2 + 帳號畫像）
-├── ad_templates.py   # 廣告模板庫（11 大類）
+├── ad_templates.py   # 基礎廣告模板庫（11 大類）
+├── ad_samples.py     # 動態廣告／白樣本庫讀寫
+├── custom_ad_samples.json  # 執行時產生，勿提交
+├── whitelist_samples.json   # 執行時產生，勿提交
 ├── requirements.txt  # 依賴套件
 ├── install.sh        # 安裝腳本
 └── runtime.txt       # Python 版本聲明

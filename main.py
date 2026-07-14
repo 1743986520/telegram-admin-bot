@@ -1176,6 +1176,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /ban - 管理員禁言用戶
 /update - 更新機器人代碼並重啟
 /updatead - 僅更新廣告模板（不重啟）
+/addsample <文字> - 將文字加入動態廣告樣本庫（Owner；也可回覆訊息使用）
+/whitelist <文字> - 將誤封訊息加入非廣告白樣本庫（Owner；也可回覆訊息使用）
+/exportsamples - 匯出動態廣告樣本與白樣本 JSON（Owner）
 /settings - 查看本群功能開關
 /feature <名稱> <on|off> - 管理員修改功能開關
 
@@ -1208,7 +1211,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "8. /update - 更新機器人並重啟\n"
         "9. /updatead - 僅更新廣告模板（不重啟）\n"
         "10. /settings - 查看本群功能開關\n"
-        "11. /feature &lt;名稱&gt; &lt;on|off&gt; - 管理員修改功能開關\n\n"
+        "11. /feature &lt;名稱&gt; &lt;on|off&gt; - 管理員修改功能開關\n"
+        "12. /addsample - Owner 回覆廣告訊息加入動態樣本庫\n"
+        "13. /whitelist - Owner 回覆誤封訊息加入非廣告白樣本庫\n"
+        "14. /exportsamples - Owner 匯出動態樣本庫 JSON\n\n"
         "📋 <b>自訂提案規則：</b>\n"
         "• 任何成員均可發起，可選擇匿名或公開\n"
         "• 需要 <b>10 票同意</b> 方可通過\n"
