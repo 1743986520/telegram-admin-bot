@@ -152,12 +152,18 @@ def load_known_groups():
         logger.error(f"加載群組數據失敗: {e}")
         known_groups = {}
 
+
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """顯示目前群組功能開關。"""
     message = update.effective_message
     chat = update.effective_chat
+    if not message or not chat:
+        return
     if chat.type == "private":
         await message.reply_text("❌ 此指令僅在群組中可用。")
+        return
+    if not await is_group_admin(context.bot, chat.id, update.effective_user.id):
+        await message.reply_text("❌ 只有本群管理員可以查看群組設定。")
         return
     features = get_group_features(known_groups.get(chat.id, {}))
     lines = ["⚙️ <b>群組功能設定</b>"]
@@ -1564,8 +1570,14 @@ async def exportsamples_command(update: Update, context: ContextTypes.DEFAULT_TY
     """/exportsamples：提取匯出動態樣本庫（廣告樣本 + 白樣本）為檔案"""
     user = update.effective_user
     message = update.effective_message
-    if user.id != OWNER_ID:
-        await message.reply_text("❌ 僅管理員可用此指令！")
+    chat = update.effective_chat
+    if not user or not message or not chat:
+        return
+    if chat.type == "private":
+        await message.reply_text("❌ 此指令僅在群組中可用。")
+        return
+    if not await is_group_admin(context.bot, chat.id, user.id):
+        await message.reply_text("❌ 只有本群管理員可以匯出樣本庫。")
         return
 
     import json
@@ -1640,6 +1652,12 @@ async def on_sample_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action_name == "sample_export":
         await exportsamples_command(update, context)
+        return
+    if action_name == "menu_settings":
+        await settings_command(update, context)
+        return
+    if action_name == "menu_help":
+        await help_command(update, context)
         return
     if action_name == "sample_add":
         pending_sample_actions[key] = "add_ad"
