@@ -8,6 +8,14 @@ import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from ad_templates import AD_TEMPLATES
+try:
+    from ad_samples import load_ad_samples, load_whitelist_samples
+except Exception:
+    # 動態樣本模組不存在時降級為空，維持原行為
+    def load_ad_samples():
+        return []
+    def load_whitelist_samples():
+        return []
 
 # ──────────────────────────────────────────────
 # 文字清洗
@@ -273,15 +281,43 @@ def check_rules(text: str) -> Tuple[bool, list]:
 
 SIMILARITY_THRESHOLD = 0.42
 
+# 白樣本救援：L2 命中時，若最相似白樣本分數不低於廣告分數，視為誤判放行。
+# margin 讓白樣本需「明顯更像」才救援，避免白樣本反噬吞掉真廣告。
+WHITELIST_RESCUE_MARGIN = 0.0
+
 def _build_vectorizers():
-    corpus = [clean_text(t).lower() for t in AD_TEMPLATES]
+    # 基礎大庫 + 動態入庫的廣告樣本
+    ad_corpus_raw = list(AD_TEMPLATES) + list(load_ad_samples())
+    corpus = [clean_text(t).lower() for t in ad_corpus_raw if clean_text(t).strip()]
     v1 = TfidfVectorizer(analyzer='char', ngram_range=(2, 4), max_features=8000, sublinear_tf=True)
     v2 = TfidfVectorizer(analyzer='char', ngram_range=(3, 6), max_features=8000, sublinear_tf=True)
     m1 = v1.fit_transform(corpus)
     m2 = v2.fit_transform(corpus)
-    return v1, m1, v2, m2
 
-_v1, _m1, _v2, _m2 = _build_vectorizers()
+    # 白樣本（非廣告）向量器：用廣告向量器的詞彙空間轉換，才能同尺度比較
+    wl_raw = [clean_text(t).lower() for t in load_whitelist_samples() if clean_text(t).strip()]
+    if wl_raw:
+        wm1 = v1.transform(wl_raw)
+        wm2 = v2.transform(wl_raw)
+    else:
+        wm1 = wm2 = None
+    return v1, m1, v2, m2, wm1, wm2
+
+_v1, _m1, _v2, _m2, _wm1, _wm2 = _build_vectorizers()
+
+def _whitelist_score(t: str) -> float:
+    """回傳輸入與最相似白樣本的分數（無白樣本時為 0）。"""
+    if _wm1 is None and _wm2 is None:
+        return 0.0
+    try:
+        scores = []
+        if _wm1 is not None and _wm1.shape[0] > 0:
+            scores.append(float(np.max(cosine_similarity(_v1.transform([t]), _wm1)[0])))
+        if _wm2 is not None and _wm2.shape[0] > 0:
+            scores.append(float(np.max(cosine_similarity(_v2.transform([t]), _wm2)[0])))
+        return round(max(scores), 3) if scores else 0.0
+    except Exception:
+        return 0.0
 
 def check_similarity(text: str) -> Tuple[bool, float]:
     """L2：TF-IDF 餘弦相似度，返回 (是否超過閾值, 最高相似度)"""
@@ -334,6 +370,12 @@ def detect_ad(raw_text: str) -> Tuple[bool, float, str]:
     # L2：模板相似度
     hit_sim, score = check_similarity(text)
     if hit_sim:
+        # 白樣本救援：僅作用於 L2（L1 明確廣告詞不救援）
+        # 若最相似白樣本分數 ≥ 廣告分數，判定為誤封並放行
+        t = clean_text(text).lower()
+        wl = _whitelist_score(t)
+        if wl >= score - WHITELIST_RESCUE_MARGIN:
+            return False, round(wl, 3), f"白樣本救援放行（廣告{score:.2f} ≤ 白{wl:.2f}）"
         return True, score, f"模板相似度: {score:.2f}"
 
     return False, round(score if 'score' in dir() else 0.0, 3), "正常訊息"

@@ -1437,6 +1437,144 @@ async def updatead_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ 更新廣告模板失敗：{e}", parse_mode="HTML")
 
 
+# ================== 動態樣本庫指令 ==================
+
+def _reload_detector():
+    """重建偵測器向量器，讓動態樣本即時生效。"""
+    import importlib
+    import ad_samples as _as
+    import ad_detector as _ad
+    importlib.reload(_as)
+    importlib.reload(_ad)
+    import sys
+    sys.modules[__name__].detect_ad = _ad.detect_ad
+
+
+def _extract_sample_text(update) -> str:
+    """從指令取得樣本文字：優先取被回覆訊息，其次取指令後的參數。"""
+    msg = update.effective_message
+    if msg and msg.reply_to_message and msg.reply_to_message.text:
+        return msg.reply_to_message.text.strip()
+    # 取指令後文字
+    if msg and msg.text:
+        parts = msg.text.split(None, 1)
+        if len(parts) == 2:
+            return parts[1].strip()
+    return ""
+
+
+async def addsample_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/addsample：入庫，把回覆的訊息或指令後文字加入廣告樣本庫"""
+    user = update.effective_user
+    if user.id != OWNER_ID:
+        await update.message.reply_text("❌ 僅管理員可用此指令！")
+        return
+
+    from ad_samples import add_ad_sample, load_ad_samples
+    text = _extract_sample_text(update)
+    if not text:
+        await update.message.reply_text(
+            "❌ 用法：回覆一則廣告訊息並發送 /addsample，或 /addsample <文字>"
+        )
+        return
+
+    added = add_ad_sample(text)
+    if not added:
+        await update.message.reply_text("ℹ️ 此樣本已存在於廣告樣本庫，未重複加入。")
+        return
+
+    try:
+        _reload_detector()
+        total = len(load_ad_samples())
+        preview = text if len(text) <= 60 else text[:60] + "…"
+        await update.message.reply_text(
+            f"✅ 已入庫廣告樣本並即時生效！\n\n"
+            f"📝 內容：{preview}\n"
+            f"📊 動態廣告樣本數：{total} 條"
+        )
+        logger.info(f"入庫廣告樣本，動態庫共 {total} 條")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ 已寫入樣本庫，但熱重載失敗：{e}")
+
+
+async def whitelist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/whitelist：誤封處理，把回覆的訊息或指令後文字加入白樣本（非廣告）"""
+    user = update.effective_user
+    if user.id != OWNER_ID:
+        await update.message.reply_text("❌ 僅管理員可用此指令！")
+        return
+
+    from ad_samples import add_whitelist_sample, load_whitelist_samples
+    text = _extract_sample_text(update)
+    if not text:
+        await update.message.reply_text(
+            "❌ 用法：回覆一則被誤判的訊息並發送 /whitelist，或 /whitelist <文字>"
+        )
+        return
+
+    added = add_whitelist_sample(text)
+    if not added:
+        await update.message.reply_text("ℹ️ 此樣本已存在於白樣本庫，未重複加入。")
+        return
+
+    try:
+        _reload_detector()
+        total = len(load_whitelist_samples())
+        preview = text if len(text) <= 60 else text[:60] + "…"
+        await update.message.reply_text(
+            f"✅ 已加入白樣本（非廣告）並即時生效！\n\n"
+            f"📝 內容：{preview}\n"
+            f"📊 白樣本數：{total} 條\n"
+            f"🛡 之後與此相似的訊息不會被誤封。"
+        )
+        logger.info(f"加入白樣本，白樣本庫共 {total} 條")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ 已寫入白樣本庫，但熱重載失敗：{e}")
+
+
+async def exportsamples_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/exportsamples：提取匯出動態樣本庫（廣告樣本 + 白樣本）為檔案"""
+    user = update.effective_user
+    if user.id != OWNER_ID:
+        await update.message.reply_text("❌ 僅管理員可用此指令！")
+        return
+
+    import json
+    import io
+    from ad_samples import load_ad_samples, load_whitelist_samples
+
+    ad_list = load_ad_samples()
+    wl_list = load_whitelist_samples()
+
+    payload = {
+        "ad_samples": ad_list,
+        "whitelist_samples": wl_list,
+        "ad_count": len(ad_list),
+        "whitelist_count": len(wl_list),
+    }
+    data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    bio = io.BytesIO(data)
+    bio.name = "samples_export.json"
+
+    try:
+        await update.message.reply_document(
+            document=bio,
+            filename="samples_export.json",
+            caption=(
+                f"📦 動態樣本庫匯出\n"
+                f"廣告樣本：{len(ad_list)} 條\n"
+                f"白樣本：{len(wl_list)} 條"
+            ),
+        )
+        logger.info(f"匯出樣本庫：廣告{len(ad_list)}/白{len(wl_list)}")
+    except Exception as e:
+        # 傳檔失敗時退回純文字摘要
+        await update.message.reply_text(
+            f"📦 動態樣本庫\n廣告樣本：{len(ad_list)} 條\n白樣本：{len(wl_list)} 條\n\n"
+            f"（傳檔失敗：{e}）"
+        )
+
+
 # ================== 廣告偵測 ==================
 
 async def get_all_admins(bot, chat_id: int) -> list:
@@ -1625,6 +1763,9 @@ def main():
     application.add_handler(CommandHandler("ban", ban_command))
     application.add_handler(CommandHandler("update", update_command))
     application.add_handler(CommandHandler("updatead", updatead_command))
+    application.add_handler(CommandHandler("addsample", addsample_command))
+    application.add_handler(CommandHandler("whitelist", whitelist_command))
+    application.add_handler(CommandHandler("exportsamples", exportsamples_command))
 
     # 廣告偵測：監聽所有群組文字訊息
     application.add_handler(MessageHandler(
