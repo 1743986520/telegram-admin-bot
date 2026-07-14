@@ -1530,17 +1530,23 @@ def _extract_sample_text(update) -> str:
 
 
 def _dedupe_ad_samples():
-    """整理廣告樣本：去除完全重複及正規化後重複的內容。"""
+    """整理動態廣告樣本，並與官方模板庫做正規化去重。
+
+    官方模板是基準；若動態樣本與官方模板在 NFKC/casefold/去空白符號後相同，
+    保留官方版本並移除動態副本，避免匯入的樣本只和自己比較。
+    """
     import re
     import unicodedata
     from ad_samples import load_ad_samples, save_ad_samples
+    from ad_templates import AD_TEMPLATES
 
     def key(text: str) -> str:
         text = unicodedata.normalize("NFKC", text).casefold()
         return re.sub(r"[\s\W_]+", "", text, flags=re.UNICODE)
 
+    official_keys = {normalized for sample in AD_TEMPLATES if (normalized := key(sample))}
     samples = load_ad_samples()
-    seen = set()
+    seen = set(official_keys)
     cleaned = []
     for sample in samples:
         normalized = key(sample)
@@ -1549,7 +1555,7 @@ def _dedupe_ad_samples():
             cleaned.append(sample.strip())
     removed = len(samples) - len(cleaned)
     save_ad_samples(cleaned)
-    return len(cleaned), removed
+    return len(cleaned), removed, len(official_keys)
 
 
 async def cleanup_ads_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1563,9 +1569,14 @@ async def cleanup_ads_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await message.reply_text("❌ 只有本群管理員可以整理廣告樣本。")
         return
     try:
-        total, removed = _dedupe_ad_samples()
+        total, removed, official_total = _dedupe_ad_samples()
         _reload_detector()
-        await message.reply_text(f"✅ 廣告樣本整理完成\n📊 保留：{total} 條\n🗑 移除重複：{removed} 條")
+        await message.reply_text(
+            f"✅ 廣告樣本整理完成\n"
+            f"📚 官方模板：{official_total} 條\n"
+            f"📊 動態樣本保留：{total} 條\n"
+            f"🗑 移除重複：{removed} 條"
+        )
     except Exception as e:
         logger.exception("整理廣告樣本失敗")
         await message.reply_text(f"❌ 整理失敗：{e}")
