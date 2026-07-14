@@ -1289,9 +1289,13 @@ async def test_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if (chat.id, user.id) not in active_tests:
         return
     is_ad, confidence, reason = detect_ad(message.text)
-    result = "會被判定為廣告" if is_ad else "不會被判定為廣告"
+    result = "✅ 會刪除並禁言" if is_ad else "✅ 不會刪除，會放行"
     await message.reply_text(
-        f"🧪 {result}\n不會執行刪除或禁言\n信心：{confidence:.0%}\n原因：{reason}"
+        f"🧪 測試結果：{result}\n"
+        f"判定：{'廣告' if is_ad else '正常訊息'}\n"
+        f"信心：{confidence:.0%}\n"
+        f"原因：{reason}\n\n"
+        f"（測試模式不會真的刪除或禁言）"
     )
 
 
