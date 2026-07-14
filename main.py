@@ -1249,10 +1249,38 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/addsample - 加入廣告樣本\n"
         "/whitelist - 加入非廣告樣本\n"
         "/exportsamples - 匯出樣本庫\n"
-        "/cleanupads - 整理並去除廣告樣本重複項",
+        "/cleanupads - 整理並去除廣告樣本重複項\n"
+        "/test <文字> - 測試是否會被判定為廣告",
         parse_mode="HTML",
         reply_markup=build_help_keyboard(),
     )
+
+async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/test：逐一測試文字，回報是否會被判定為廣告及是否會執行封禁。"""
+    message = update.effective_message
+    chat = update.effective_chat
+    if not message:
+        return
+
+    raw = " ".join(context.args).strip()
+    if not raw and message.reply_to_message and message.reply_to_message.text:
+        raw = message.reply_to_message.text.strip()
+    if not raw:
+        await message.reply_text("用法：/test 廣告文字\n或回覆一則文字訊息後輸入 /test")
+        return
+
+    is_ad, confidence, reason = detect_ad(raw)
+    should_mute = bool(
+        chat and chat.type in ("group", "supergroup")
+        and feature_enabled(known_groups.get(chat.id, {}), "ad_detection")
+        and feature_enabled(known_groups.get(chat.id, {}), "ad_mute")
+    )
+    result = "會被判定為廣告" if is_ad else "不會被判定為廣告"
+    action = "會觸發禁言" if is_ad and should_mute else "不會禁言"
+    await message.reply_text(
+        f"🧪 測試結果\n{result}\n{action}\n信心：{confidence:.0%}\n原因：{reason}"
+    )
+
 
 async def banme(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """處理 /banme 指令"""
@@ -2018,6 +2046,7 @@ def main():
     application.add_handler(CommandHandler("whitelist", whitelist_command))
     application.add_handler(CommandHandler("exportsamples", exportsamples_command))
     application.add_handler(CommandHandler("cleanupads", cleanup_ads_command))
+    application.add_handler(CommandHandler("test", test_command))
 
     # 按鈕操作：樣本庫、設定與說明
     application.add_handler(CallbackQueryHandler(
