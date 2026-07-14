@@ -62,6 +62,7 @@ pending_proposal_setup: Dict[Tuple[int,int], Dict] = {}  # (chat_id, user_id) ->
 pending_sample_actions: Dict[Tuple[int, int], str] = {}  # (chat_id, user_id) -> add_ad/whitelist
 consumed_sample_messages = set()  # (chat_id, message_id)，避免樣本輸入再進廣告偵測
 pending_false_positive_samples: Dict[str, str] = {}  # token -> 被攔截原文
+active_tests: set = set()  # (chat_id, user_id)，/test 後持續測試直到 /stop
 
 # ================== 權限設定 ==================
 def create_simple_mute_permissions():
@@ -1250,35 +1251,47 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/whitelist - 加入非廣告樣本\n"
         "/exportsamples - 匯出樣本庫\n"
         "/cleanupads - 整理並去除廣告樣本重複項\n"
-        "/test <文字> - 測試是否會被判定為廣告",
+        "/test - 開始逐則測試（/stop 結束）\n"
+        "/stop - 停止測試模式",
         parse_mode="HTML",
         reply_markup=build_help_keyboard(),
     )
 
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/test：逐一測試文字，回報是否會被判定為廣告及是否會執行封禁。"""
+    """/test：開始持續測試，直到使用 /stop。"""
     message = update.effective_message
     chat = update.effective_chat
-    if not message:
+    user = update.effective_user
+    if not message or not chat or not user:
         return
+    active_tests.add((chat.id, user.id))
+    await message.reply_text("🧪 已開始測試模式。請逐則傳送文字；輸入 /stop 結束。")
 
-    raw = " ".join(context.args).strip()
-    if not raw and message.reply_to_message and message.reply_to_message.text:
-        raw = message.reply_to_message.text.strip()
-    if not raw:
-        await message.reply_text("用法：/test 廣告文字\n或回覆一則文字訊息後輸入 /test")
+
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/stop：停止目前使用者的持續測試模式。"""
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not message or not chat or not user:
         return
+    active_tests.discard((chat.id, user.id))
+    await message.reply_text("🛑 已停止測試模式。")
 
-    is_ad, confidence, reason = detect_ad(raw)
-    should_mute = bool(
-        chat and chat.type in ("group", "supergroup")
-        and feature_enabled(known_groups.get(chat.id, {}), "ad_detection")
-        and feature_enabled(known_groups.get(chat.id, {}), "ad_mute")
-    )
+
+async def test_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """測試模式下逐則分析文字，不執行刪除或禁言。"""
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not message or not message.text or not chat or not user:
+        return
+    if (chat.id, user.id) not in active_tests:
+        return
+    is_ad, confidence, reason = detect_ad(message.text)
     result = "會被判定為廣告" if is_ad else "不會被判定為廣告"
-    action = "會觸發禁言" if is_ad and should_mute else "不會禁言"
     await message.reply_text(
-        f"🧪 測試結果\n{result}\n{action}\n信心：{confidence:.0%}\n原因：{reason}"
+        f"🧪 {result}\n不會執行刪除或禁言\n信心：{confidence:.0%}\n原因：{reason}"
     )
 
 
@@ -1796,6 +1809,9 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     user = update.effective_user
     if not message or not message.text or not chat or not user:
         return
+    if (chat.id, user.id) in active_tests:
+        await test_message(update, context)
+        return
     if (chat.id, user.id) in pending_sample_actions:
         await handle_sample_input(update, context)
         return
@@ -2047,6 +2063,7 @@ def main():
     application.add_handler(CommandHandler("exportsamples", exportsamples_command))
     application.add_handler(CommandHandler("cleanupads", cleanup_ads_command))
     application.add_handler(CommandHandler("test", test_command))
+    application.add_handler(CommandHandler("stop", stop_command))
 
     # 按鈕操作：樣本庫、設定與說明
     application.add_handler(CallbackQueryHandler(
