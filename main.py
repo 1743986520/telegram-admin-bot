@@ -1606,6 +1606,18 @@ async def exportsamples_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 
+async def is_group_admin(bot, chat_id: int, user_id: int) -> bool:
+    """確認使用者是該群組管理員；Owner 可跨群組管理樣本。"""
+    if user_id == OWNER_ID:
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+        return member.status in ("administrator", "creator")
+    except Exception as e:
+        logger.warning(f"樣本庫權限檢查失敗 chat={chat_id} user={user_id}: {e}")
+        return False
+
+
 async def on_sample_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """處理樣本庫按鈕；新增樣本時由下一則文字訊息提供內容。"""
     query = update.callback_query
@@ -1613,8 +1625,9 @@ async def on_sample_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await query.answer()
     user = query.from_user
-    if user.id != OWNER_ID:
-        await query.answer("僅 Owner 可以管理樣本庫", show_alert=True)
+    callback_chat_id = query.message.chat_id if query.message else None
+    if callback_chat_id is None or not await is_group_admin(context.bot, callback_chat_id, user.id):
+        await query.answer("只有本群管理員可以操作樣本庫", show_alert=True)
         return
 
     action = query.data
@@ -1687,6 +1700,10 @@ async def handle_sample_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not message or not message.text or not user or not chat:
         return
     key = (chat.id, user.id)
+    if not await is_group_admin(context.bot, chat.id, user.id):
+        await message.reply_text("❌ 只有本群管理員可以輸入樣本。")
+        pending_sample_actions.pop(key, None)
+        return
     action = pending_sample_actions.pop(key, None)
     if not action:
         return
