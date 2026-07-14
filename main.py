@@ -171,7 +171,7 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{'✅' if enabled else '⛔'} <code>{name}</code>：{FEATURE_LABELS[name]}"
         for name, enabled in features.items()
     )
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    await message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def feature_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1226,7 +1226,10 @@ def build_help_keyboard() -> InlineKeyboardMarkup:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """處理 /help 指令"""
-    await update.message.reply_text(
+    message = update.effective_message
+    if not message:
+        return
+    await message.reply_text(
         "📖 幫助信息\n\n"
         "1. /start - 查看狀態\n"
         "2. /help - 查看詳細幫助\n"
@@ -1598,7 +1601,7 @@ async def exportsamples_command(update: Update, context: ContextTypes.DEFAULT_TY
     bio.name = "samples_export.json"
 
     try:
-        await update.message.reply_document(
+        await message.reply_document(
             document=bio,
             filename="samples_export.json",
             caption=(
@@ -1610,7 +1613,7 @@ async def exportsamples_command(update: Update, context: ContextTypes.DEFAULT_TY
         logger.info(f"匯出樣本庫：廣告{len(ad_list)}/白{len(wl_list)}")
     except Exception as e:
         # 傳檔失敗時退回純文字摘要
-        await update.message.reply_text(
+        await message.reply_text(
             f"📦 動態樣本庫\n廣告樣本：{len(ad_list)} 條\n白樣本：{len(wl_list)} 條\n\n"
             f"（傳檔失敗：{e}）"
         )
@@ -1635,13 +1638,13 @@ async def on_sample_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
         return
-    await query.answer()
     user = query.from_user
     callback_chat_id = query.message.chat_id if query.message else None
     if callback_chat_id is None or not await is_group_admin(context.bot, callback_chat_id, user.id):
         await query.answer("只有本群管理員可以操作樣本庫", show_alert=True)
         return
 
+    await query.answer()
     action = query.data
     if action.startswith("false_positive_whitelist:"):
         action_name, _, token = action.partition(":")
