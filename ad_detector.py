@@ -120,7 +120,11 @@ _RULES = [
     (r"(速来|来|了解|私聊|联系).{0,10}@\w{3,}", "引流@帳號"),
     (r"看(简介|我).{0,5}@\w{3,}", "引流@帳號"),
 
-    # 洗U / USDT 灰產
+    # GPT／OpenAI 訂閱與 VCC 金融卡推廣
+    (r"(GPT|ChatGPT|OpenAI).{0,20}(订阅|訂閱|拒付|拒絕|扣费|扣費)", "GPT訂閱推廣"),
+    (r"(VCC|虚拟信用卡|虛擬信用卡).{0,30}(GPT|ChatGPT|OpenAI|免开卡费|免開卡費|量大)", "VCC金融卡推廣"),
+    (r"(GPT|ChatGPT|OpenAI).{0,30}(VCC|虚拟信用卡|虛擬信用卡|免开卡费|免開卡費)", "GPT金融卡推廣"),
+
     (r"(洗\s*[Uu✓]|洗\s*钱).{0,20}(赚|空缺|团队)", "洗U灰產"),
     (r"USDT\s*(搬砖|项目|转账).{0,20}(空缺|勤快|小白)", "洗U灰產"),
     (r"(轻\s*灰\s*产|灰\s*产).{0,10}(跑通|项目|来)", "洗U灰產"),
@@ -345,10 +349,10 @@ def check_similarity(text: str) -> Tuple[bool, float]:
 # ──────────────────────────────────────────────
 
 def _is_pure_url(text: str) -> bool:
-    """判斷是否為純連結（無其他實質內容）"""
+    """只有整段幾乎是連結時才跳過；一般短句不能被當成純連結。"""
     import re as _r
-    stripped = _r.sub(r'https?://\S+|t\.me/\S+', '', text).strip()
-    return len(stripped) < 8  # 去掉連結後剩餘內容不足8字
+    stripped = _r.sub(r'https?://\S+|t\.me/\S+|www\.\S+', '', text).strip()
+    return bool(_r.search(r'https?://|t\.me/|www\.', text, flags=_r.I)) and len(stripped) < 8
 
 def detect_ad(raw_text: str) -> Tuple[bool, float, str]:
     """
