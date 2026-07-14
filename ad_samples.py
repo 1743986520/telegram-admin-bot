@@ -44,6 +44,12 @@ def _save(path: str, items: List[str]) -> None:
     os.replace(tmp, path)  # 原子寫入，避免半截檔案
 
 
+def save_ad_samples(items: List[str]) -> None:
+    """保存整理後的廣告樣本。"""
+    with _lock:
+        _save(AD_SAMPLES_FILE, items)
+
+
 def load_ad_samples() -> List[str]:
     """讀取動態廣告樣本。"""
     return _load(AD_SAMPLES_FILE)

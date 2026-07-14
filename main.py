@@ -1225,6 +1225,7 @@ def build_help_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🛡 加入非廣告白樣本", callback_data="sample_whitelist"),
         ],
         [InlineKeyboardButton("📦 匯出樣本庫", callback_data="sample_export")],
+        [InlineKeyboardButton("🧹 整理廣告去重", callback_data="ads_cleanup")],
         [
             InlineKeyboardButton("⚙️ 群組設定", callback_data="menu_settings"),
             InlineKeyboardButton("📖 指令說明", callback_data="menu_help"),
@@ -1247,7 +1248,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/propose <內容> - 發起提案\n"
         "/addsample - 加入廣告樣本\n"
         "/whitelist - 加入非廣告樣本\n"
-        "/exportsamples - 匯出樣本庫",
+        "/exportsamples - 匯出樣本庫\n"
+        "/cleanupads - 整理並去除廣告樣本重複項",
         parse_mode="HTML",
         reply_markup=build_help_keyboard(),
     )
@@ -1486,6 +1488,49 @@ def _extract_sample_text(update) -> str:
     return ""
 
 
+def _dedupe_ad_samples():
+    """整理廣告樣本：去除完全重複及正規化後重複的內容。"""
+    import re
+    import unicodedata
+    from ad_samples import load_ad_samples, save_ad_samples
+
+    def key(text: str) -> str:
+        text = unicodedata.normalize("NFKC", text).casefold()
+        return re.sub(r"[\s\W_]+", "", text, flags=re.UNICODE)
+
+    samples = load_ad_samples()
+    seen = set()
+    cleaned = []
+    for sample in samples:
+        normalized = key(sample)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            cleaned.append(sample.strip())
+    removed = len(samples) - len(cleaned)
+    save_ad_samples(cleaned)
+    return len(cleaned), removed
+
+
+async def cleanup_ads_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """整理廣告樣本庫，移除重複項目。"""
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not message or not chat or not user:
+        return
+    if chat.type == "private" or not await is_group_admin(context.bot, chat.id, user.id):
+        await message.reply_text("❌ 只有本群管理員可以整理廣告樣本。")
+        return
+    try:
+        total, removed = _dedupe_ad_samples()
+        _reload_detector()
+        await message.reply_text(f"✅ 廣告樣本整理完成\n📊 保留：{total} 條\n🗑 移除重複：{removed} 條")
+    except Exception as e:
+        logger.exception("整理廣告樣本失敗")
+        await message.reply_text(f"❌ 整理失敗：{e}")
+
+
+
 async def addsample_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/addsample：入庫，把回覆的訊息或指令後文字加入廣告樣本庫"""
     user = update.effective_user
@@ -1666,6 +1711,10 @@ async def on_sample_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=keyboard)
         return
 
+    if action_name == "ads_cleanup":
+        await query.answer("正在整理廣告樣本…")
+        await cleanup_ads_command(update, context)
+        return
     if action_name == "sample_export":
         await exportsamples_command(update, context)
         return
@@ -1968,11 +2017,12 @@ def main():
     application.add_handler(CommandHandler("addsample", addsample_command))
     application.add_handler(CommandHandler("whitelist", whitelist_command))
     application.add_handler(CommandHandler("exportsamples", exportsamples_command))
+    application.add_handler(CommandHandler("cleanupads", cleanup_ads_command))
 
     # 按鈕操作：樣本庫、設定與說明
     application.add_handler(CallbackQueryHandler(
         on_sample_action,
-        pattern=r"^(sample_add|sample_whitelist|sample_export|menu_settings|menu_help|feature_toggle:[a-z_]+|false_positive_whitelist:[0-9a-f]+)$",
+        pattern=r"^(sample_add|sample_whitelist|sample_export|ads_cleanup|menu_settings|menu_help|feature_toggle:[a-z_]+|false_positive_whitelist:[0-9a-f]+)$",
     ))
 
     # 按鈕選擇新增樣本後，下一則文字直接作為樣本內容
