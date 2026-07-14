@@ -58,6 +58,7 @@ user_welcomed: Dict[Tuple[int, int], bool] = {}
 active_referendums: Dict[int, Dict] = {}        # chat_id -> 全員禁言公投狀態
 active_proposals: Dict[int, Dict] = {}          # chat_id -> 自訂提案狀態
 pending_proposal_setup: Dict[Tuple[int,int], Dict] = {}  # (chat_id, user_id) -> 待確認匿名設定
+pending_sample_actions: Dict[Tuple[int, int], str] = {}  # (chat_id, user_id) -> add_ad/whitelist
 
 # ================== 權限設定 ==================
 def create_simple_mute_permissions():
@@ -150,9 +151,10 @@ def load_known_groups():
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """顯示目前群組功能開關。"""
+    message = update.effective_message
     chat = update.effective_chat
     if chat.type == "private":
-        await update.message.reply_text("❌ 此指令僅在群組中可用。")
+        await message.reply_text("❌ 此指令僅在群組中可用。")
         return
     features = get_group_features(known_groups.get(chat.id, {}))
     lines = ["⚙️ <b>群組功能設定</b>"]
@@ -1195,7 +1197,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ✅ 發送消息
 """
     
-    await update.message.reply_text(response, parse_mode="Markdown")
+    message = update.effective_message
+    await message.reply_text(response, parse_mode="Markdown", reply_markup=build_help_keyboard())
+
+
+def build_help_keyboard() -> InlineKeyboardMarkup:
+    """建立常用管理功能按鈕，避免管理員必須手動輸入指令。"""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("➕ 加入廣告樣本", callback_data="sample_add"),
+            InlineKeyboardButton("🛡 加入非廣告白樣本", callback_data="sample_whitelist"),
+        ],
+        [InlineKeyboardButton("📦 匯出樣本庫", callback_data="sample_export")],
+        [
+            InlineKeyboardButton("⚙️ 群組設定", callback_data="menu_settings"),
+            InlineKeyboardButton("📖 指令說明", callback_data="menu_help"),
+        ],
+    ])
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """處理 /help 指令"""
@@ -1232,7 +1250,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 連結預覽\n"
         "• 邀請用戶\n"
         "• 發送消息",
-        parse_mode="HTML"
+        parse_mode="HTML",
+        reply_markup=build_help_keyboard(),
     )
 
 async def banme(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1541,8 +1560,9 @@ async def whitelist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def exportsamples_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/exportsamples：提取匯出動態樣本庫（廣告樣本 + 白樣本）為檔案"""
     user = update.effective_user
+    message = update.effective_message
     if user.id != OWNER_ID:
-        await update.message.reply_text("❌ 僅管理員可用此指令！")
+        await message.reply_text("❌ 僅管理員可用此指令！")
         return
 
     import json
@@ -1581,7 +1601,79 @@ async def exportsamples_command(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
 
-# ================== 廣告偵測 ==================
+
+
+async def on_sample_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """處理樣本庫按鈕；新增樣本時由下一則文字訊息提供內容。"""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    user = query.from_user
+    if user.id != OWNER_ID:
+        await query.answer("僅 Owner 可以管理樣本庫", show_alert=True)
+        return
+
+    action = query.data
+    chat_id = query.message.chat_id if query.message else user.id
+    key = (chat_id, user.id)
+
+    if action == "sample_export":
+        await exportsamples_command(update, context)
+        return
+    if action == "sample_add":
+        pending_sample_actions[key] = "add_ad"
+        await query.message.reply_text(
+            "➕ 請直接傳送要加入的廣告樣本文字。\n"
+            "（只會讀取你下一則文字訊息。）"
+        )
+    elif action == "sample_whitelist":
+        pending_sample_actions[key] = "whitelist"
+        await query.message.reply_text(
+            "🛡 請直接傳送被誤封的訊息文字，加入非廣告白樣本庫。\n"
+            "（只會讀取你下一則文字訊息。）"
+        )
+    elif action == "menu_settings":
+        await settings_command(update, context)
+    elif action == "menu_help":
+        await help_command(update, context)
+
+
+async def handle_sample_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """接收按鈕流程中管理員輸入的樣本文字。"""
+    message = update.effective_message
+    user = update.effective_user
+    chat = update.effective_chat
+    if not message or not message.text or not user or not chat:
+        return
+    key = (chat.id, user.id)
+    action = pending_sample_actions.pop(key, None)
+    if not action:
+        return
+    if user.id != OWNER_ID:
+        await message.reply_text("❌ 僅 Owner 可以管理樣本庫。")
+        return
+
+    text = message.text.strip()
+    if action == "add_ad":
+        from ad_samples import add_ad_sample, load_ad_samples
+        added = add_ad_sample(text)
+        label = "廣告樣本"
+        total = len(load_ad_samples())
+    else:
+        from ad_samples import add_whitelist_sample, load_whitelist_samples
+        added = add_whitelist_sample(text)
+        label = "非廣告白樣本"
+        total = len(load_whitelist_samples())
+
+    if not added:
+        await message.reply_text(f"ℹ️ 此{label}已存在，沒有重複加入。")
+        return
+    try:
+        _reload_detector()
+        await message.reply_text(f"✅ 已加入{label}並即時生效！\n📊 目前共 {total} 條。")
+    except Exception as e:
+        await message.reply_text(f"⚠️ 已寫入樣本庫，但熱重載失敗：{e}")
 
 async def get_all_admins(bot, chat_id: int) -> list:
     """取得群組所有管理員列表"""
@@ -1772,6 +1864,18 @@ def main():
     application.add_handler(CommandHandler("addsample", addsample_command))
     application.add_handler(CommandHandler("whitelist", whitelist_command))
     application.add_handler(CommandHandler("exportsamples", exportsamples_command))
+
+    # 按鈕操作：樣本庫、設定與說明
+    application.add_handler(CallbackQueryHandler(
+        on_sample_action,
+        pattern=r"^(sample_add|sample_whitelist|sample_export|menu_settings|menu_help)$",
+    ))
+
+    # 按鈕選擇新增樣本後，下一則文字直接作為樣本內容
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        handle_sample_input,
+    ), group=0)
 
     # 廣告偵測：監聽所有群組文字訊息
     application.add_handler(MessageHandler(
