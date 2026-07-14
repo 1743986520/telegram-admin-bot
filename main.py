@@ -171,7 +171,14 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{'✅' if enabled else '⛔'} <code>{name}</code>：{FEATURE_LABELS[name]}"
         for name, enabled in features.items()
     )
-    await message.reply_text("\n".join(lines), parse_mode="HTML")
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"{'✅' if enabled else '⛔'} {name}",
+            callback_data=f"feature_toggle:{name}",
+        )]
+        for name, enabled in features.items()
+    ])
+    await message.reply_text("\n".join(lines), parse_mode="HTML", reply_markup=keyboard)
 
 
 async def feature_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1653,6 +1660,33 @@ async def on_sample_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat_id if query.message else user.id
     key = (chat_id, user.id)
 
+    if action.startswith("feature_toggle:"):
+        feature_name = action.split(":", 1)[1]
+        if feature_name not in DEFAULT_FEATURES:
+            await query.answer("無效的功能項目", show_alert=True)
+            return
+        set_group_feature(known_groups, chat_id, feature_name, not feature_enabled(
+            known_groups.get(chat_id, {}), feature_name
+        ))
+        known_groups.setdefault(chat_id, {})["title"] = query.message.chat.title or str(chat_id)
+        save_known_groups()
+        enabled = feature_enabled(known_groups.get(chat_id, {}), feature_name)
+        features = get_group_features(known_groups.get(chat_id, {}))
+        lines = ["⚙️ <b>群組功能設定</b>"]
+        lines.extend(
+            f"{'✅' if value else '⛔'} <code>{name}</code>：{FEATURE_LABELS[name]}"
+            for name, value in features.items()
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                f"{'✅' if value else '⛔'} {name}",
+                callback_data=f"feature_toggle:{name}",
+            )]
+            for name, value in features.items()
+        ])
+        await query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=keyboard)
+        return
+
     if action_name == "sample_export":
         await exportsamples_command(update, context)
         return
@@ -1959,7 +1993,7 @@ def main():
     # 按鈕操作：樣本庫、設定與說明
     application.add_handler(CallbackQueryHandler(
         on_sample_action,
-        pattern=r"^(sample_add|sample_whitelist|sample_export|menu_settings|menu_help|false_positive_whitelist:[0-9a-f]+)$",
+        pattern=r"^(sample_add|sample_whitelist|sample_export|menu_settings|menu_help|feature_toggle:[a-z_]+|false_positive_whitelist:[0-9a-f]+)$",
     ))
 
     # 按鈕選擇新增樣本後，下一則文字直接作為樣本內容
