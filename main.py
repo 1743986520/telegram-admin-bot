@@ -61,7 +61,7 @@ active_proposals: Dict[int, Dict] = {}          # chat_id -> 自訂提案狀態
 pending_proposal_setup: Dict[Tuple[int,int], Dict] = {}  # (chat_id, user_id) -> 待確認匿名設定
 pending_sample_actions: Dict[Tuple[int, int], str] = {}  # (chat_id, user_id) -> add_ad/whitelist
 consumed_sample_messages = set()  # (chat_id, message_id)，避免樣本輸入再進廣告偵測
-pending_false_positive_samples: Dict[str, str] = {}  # token -> 被攔截原文
+pending_false_positive_samples: Dict[str, dict] = {}  # token -> {"text","chat_id","user_id"}
 active_tests: set = set()  # (chat_id, user_id)，/test 後持續測試直到 /stop
 
 # ================== 權限設定 ==================
@@ -353,7 +353,20 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         if old_status in ["left", "kicked"] and new_status == "member":
             logger.info(f"👤 新成員: {user.full_name} (ID: {user.id}) 加入 {chat.title}")
-            
+
+            # 🚨 鎖群模式：直接禁言，不歡迎、不簡介檢測、不發驗證按鈕，保持安靜
+            if known_groups.get(chat.id, {}).get("lockdown", False):
+                try:
+                    await context.bot.restrict_chat_member(
+                        chat_id=chat.id,
+                        user_id=user.id,
+                        permissions=create_simple_mute_permissions(),
+                    )
+                    logger.info(f"🚨 鎖群模式：新成員 {user.id} 已直接禁言（{chat.id}）")
+                except Exception as e:
+                    logger.error(f"鎖群模式禁言失敗 chat={chat.id} user={user.id}: {e}")
+                return
+
             # 檢查用戶簡介
             bio = ""
             is_suspicious = False
@@ -1265,7 +1278,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/exportsamples - 匯出樣本庫\n"
         "/cleanupads - 整理並去除廣告樣本重複項\n"
         "/test - 開始逐則測試（/stop 結束）\n"
-        "/stop - 停止測試模式",
+        "/omg - 炸群應急鎖群（禁言所有新加入者，/stop 解除）\n"
+        "/stop - 停止測試模式 / 解除鎖群模式",
         parse_mode="HTML",
         reply_markup=build_help_keyboard(),
     )
@@ -1281,14 +1295,64 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await message.reply_text("🧪 已開始測試模式。請逐則傳送文字；輸入 /stop 結束。")
 
 
+async def omg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/omg：炸群應急鎖群模式。開啟後，在收到 /stop 前，所有新加入成員一律先禁言、保持安靜。"""
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not message or not chat or not user:
+        return
+    if chat.type not in ("group", "supergroup"):
+        await message.reply_text("❌ 此指令僅在群組中可用！")
+        return
+    if not await is_group_admin(context.bot, chat.id, user.id):
+        await message.reply_text("❌ 只有本群管理員可以啟用鎖群模式。")
+        return
+
+    has_perms, perm_msg = await check_bot_permissions(context.bot, chat.id)
+    if not has_perms:
+        await message.reply_text(
+            f"❌ 權限檢查失敗！\n{perm_msg}\n\n請確認機器人有「限制成員」與「刪除訊息」權限。",
+            parse_mode="HTML",
+        )
+        return
+
+    known_groups.setdefault(chat.id, {"title": chat.title or str(chat.id), "status": "active"})
+    known_groups[chat.id]["title"] = chat.title or str(chat.id)
+    known_groups[chat.id]["lockdown"] = True
+    save_known_groups()
+
+    logger.warning(f"🚨 鎖群模式已由 {user.id} 於群組 {chat.id} 啟動")
+    await message.reply_text(
+        "🚨 <b>鎖群模式已啟動</b>\n\n"
+        "在收到 /stop 之前：\n"
+        "• 所有新加入成員將直接禁言，不做簡介/廣告判斷\n"
+        "• 不發歡迎訊息、不發驗證按鈕，保持安靜\n"
+        "• 「OO加入了群組」系統訊息會被自動刪除\n\n"
+        "確認情況解除後，請管理員執行 /stop 解鎖。",
+        parse_mode="HTML",
+    )
+
+
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/stop：停止目前使用者的持續測試模式。"""
+    """/stop：停止目前使用者的持續測試模式；群組中若鎖群模式（/omg）啟動中，管理員可一併解除。"""
     message = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
     if not message or not chat or not user:
         return
     active_tests.discard((chat.id, user.id))
+
+    if chat.type in ("group", "supergroup") and known_groups.get(chat.id, {}).get("lockdown", False):
+        if not await is_group_admin(context.bot, chat.id, user.id):
+            await message.reply_text("🛑 已停止測試模式。\n❌ 鎖群模式仍在運作中，僅本群管理員可解除。")
+            return
+        known_groups[chat.id]["lockdown"] = False
+        save_known_groups()
+        logger.warning(f"🔓 鎖群模式已由 {user.id} 於群組 {chat.id} 解除")
+        await message.reply_text("🛑 已停止測試模式。\n🔓 鎖群模式已解除，新加入成員恢復正常入群檢測流程。")
+        return
+
     await message.reply_text("🛑 已停止測試模式。")
 
 
@@ -1643,8 +1707,24 @@ async def whitelist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     added = add_whitelist_sample(text)
+
+    # 若是回覆某位用戶的訊息，順便嘗試恢復其發言權限（誤封解除）
+    unmute_note = ""
+    reply_msg = update.effective_message.reply_to_message if update.effective_message else None
+    if reply_msg and reply_msg.from_user and not reply_msg.from_user.is_bot:
+        try:
+            await context.bot.restrict_chat_member(
+                chat_id=update.effective_chat.id,
+                user_id=reply_msg.from_user.id,
+                permissions=create_simple_unmute_permissions(),
+            )
+            unmute_note = "\n🔓 已恢復該用戶發言權限。"
+        except Exception as e:
+            logger.error(f"/whitelist 解除禁言失敗: {e}")
+            unmute_note = f"\n⚠️ 解除禁言失敗：{str(e)[:80]}"
+
     if not added:
-        await update.message.reply_text("ℹ️ 此樣本已存在於白樣本庫，未重複加入。")
+        await update.message.reply_text(f"ℹ️ 此樣本已存在於白樣本庫，未重複加入。{unmute_note}")
         return
 
     try:
@@ -1655,11 +1735,11 @@ async def whitelist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ 已加入白樣本（非廣告）並即時生效！\n\n"
             f"📝 內容：{preview}\n"
             f"📊 白樣本數：{total} 條\n"
-            f"🛡 之後與此相似的訊息不會被誤封。"
+            f"🛡 之後與此相似的訊息不會被誤封。{unmute_note}"
         )
         logger.info(f"加入白樣本，白樣本庫共 {total} 條")
     except Exception as e:
-        await update.message.reply_text(f"⚠️ 已寫入白樣本庫，但熱重載失敗：{e}")
+        await update.message.reply_text(f"⚠️ 已寫入白樣本庫，但熱重載失敗：{e}{unmute_note}")
 
 
 async def exportsamples_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1799,23 +1879,42 @@ async def on_sample_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "（只會讀取你下一則文字訊息。）"
         )
     elif action_name == "false_positive_whitelist":
-        text = pending_false_positive_samples.pop(token, None)
-        if not text:
+        record = pending_false_positive_samples.pop(token, None)
+        if not record:
             await query.answer("這則攔截通知已過期，請使用 /whitelist 回覆原訊息", show_alert=True)
             return
+        text = record["text"]
+        target_chat_id = record.get("chat_id", chat_id)
+        target_user_id = record.get("user_id")
+
         from ad_samples import add_whitelist_sample, load_whitelist_samples
         added = add_whitelist_sample(text)
+
+        # 恢復被誤封用戶的發言權限
+        unmute_note = ""
+        if target_user_id is not None:
+            try:
+                await context.bot.restrict_chat_member(
+                    chat_id=target_chat_id,
+                    user_id=target_user_id,
+                    permissions=create_simple_unmute_permissions(),
+                )
+                unmute_note = "，已恢復該用戶發言權限"
+            except Exception as e:
+                logger.error(f"誤封解除禁言失敗 chat={target_chat_id} user={target_user_id}: {e}")
+                unmute_note = f"，但解除禁言失敗：{str(e)[:80]}"
+
         if not added:
             await query.edit_message_reply_markup(reply_markup=None)
-            await query.message.reply_text("ℹ️ 此訊息已在非廣告白樣本庫中。")
+            await query.message.reply_text(f"ℹ️ 此訊息已在非廣告白樣本庫中{unmute_note}。")
             return
         try:
             _reload_detector()
             total = len(load_whitelist_samples())
             await query.edit_message_reply_markup(reply_markup=None)
-            await query.message.reply_text(f"✅ 已將該則誤封訊息加入非廣告樣本庫，目前共 {total} 條。")
+            await query.message.reply_text(f"✅ 已將該則誤封訊息加入非廣告樣本庫，目前共 {total} 條{unmute_note}。")
         except Exception as e:
-            await query.message.reply_text(f"⚠️ 已寫入非廣告樣本庫，但熱重載失敗：{e}")
+            await query.message.reply_text(f"⚠️ 已寫入非廣告樣本庫，但熱重載失敗：{e}{unmute_note}")
 
     elif action_name == "menu_settings":
         await settings_command(update, context)
@@ -1880,6 +1979,20 @@ async def handle_sample_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         await message.reply_text(f"✅ 已加入{label}並即時生效！\n📊 目前共 {total} 條。")
     except Exception as e:
         await message.reply_text(f"⚠️ 已寫入樣本庫，但熱重載失敗：{e}")
+
+async def handle_new_member_service_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """鎖群模式（/omg）下，刪除「OO加入了群組」系統訊息，保持安靜。"""
+    message = update.effective_message
+    chat = update.effective_chat
+    if not message or not chat:
+        return
+    if not known_groups.get(chat.id, {}).get("lockdown", False):
+        return
+    try:
+        await message.delete()
+    except Exception as e:
+        logger.warning(f"鎖群模式刪除入群訊息失敗 chat={chat.id}: {e}")
+
 
 async def get_all_admins(bot, chat_id: int) -> list:
     """取得群組所有管理員列表"""
@@ -1948,7 +2061,11 @@ async def handle_message_ad_check(update: Update, context: ContextTypes.DEFAULT_
     )
 
     token = uuid.uuid4().hex
-    pending_false_positive_samples[token] = message.text
+    pending_false_positive_samples[token] = {
+        "text": message.text,
+        "chat_id": chat.id,
+        "user_id": user.id,
+    }
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton(
             "🛡 誤封：加入非廣告樣本",
@@ -2085,6 +2202,13 @@ def main():
     application.add_handler(CommandHandler("cleanupads", cleanup_ads_command))
     application.add_handler(CommandHandler("test", test_command))
     application.add_handler(CommandHandler("stop", stop_command))
+    application.add_handler(CommandHandler("omg", omg_command))
+
+    # 鎖群模式（/omg）：刪除「OO加入了群組」系統訊息
+    application.add_handler(MessageHandler(
+        filters.StatusUpdate.NEW_CHAT_MEMBERS,
+        handle_new_member_service_message,
+    ))
 
     # 按鈕操作：樣本庫、設定與說明
     application.add_handler(CallbackQueryHandler(
