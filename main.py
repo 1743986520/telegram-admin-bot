@@ -610,6 +610,7 @@ async def on_captcha_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if time.time() - verify_info["timestamp"] > 1800:
             await query.edit_message_caption(caption="❌ 驗證已過期（超過30分鐘）", reply_markup=None)
+            asyncio.create_task(_delete_after(query.message, 5))
             del pending_verifications[user_id]
             return
 
@@ -621,9 +622,10 @@ async def on_captcha_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     caption=f"❌ 已達最大嘗試次數（{VERIFY_ATTEMPT_LIMIT}次），請聯繫管理員手動處理。",
                     reply_markup=None,
                 )
+                asyncio.create_task(_delete_after(query.message, 8))
                 return
 
-            # 答錯，重新出題
+            # 答錯，重新出題，舊題目直接刪除避免洗版
             captcha_img, answer = generate_math_captcha()
             options = _generate_captcha_options(answer)
             verify_info["captcha_answer"] = answer
@@ -633,11 +635,14 @@ async def on_captcha_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton(str(opt), callback_data=f"captcha_{user_id}_{opt}")
                 for opt in options
             ]]
-            await query.edit_message_caption(caption=f"❌ 答錯了（剩餘 {remaining} 次機會），請見下方新題目", reply_markup=None)
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
             await context.bot.send_photo(
                 chat_id,
                 photo=captcha_img,
-                caption=f"請點選正確答案（剩餘 {remaining} 次機會）",
+                caption=f"❌ 答錯了，請見新題目（剩餘 {remaining} 次機會）",
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
             return
@@ -666,6 +671,7 @@ async def on_captcha_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML",
                 reply_markup=None,
             )
+            asyncio.create_task(_delete_after(query.message, 5))
         except Exception as e:
             logger.error(f"解除禁言失敗: {e}")
             await query.edit_message_caption(caption=f"❌ 解除禁言失敗: {str(e)[:100]}", reply_markup=None)
