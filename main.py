@@ -1,12 +1,16 @@
 import os
 import re
 import sys
+import io
+import shutil
 import subprocess
 import asyncio
 import time
 from typing import Optional, Dict, Tuple
 import logging
 import uuid
+import random
+from PIL import Image, ImageDraw, ImageFont
 from ad_detector import detect_ad
 from settings import (
     DEFAULT_FEATURES,
@@ -55,6 +59,7 @@ ADMIN_GROUP_LINK = "https://t.me/diacg_administration"
 # 數據存儲
 known_groups: Dict[int, Dict] = {}
 pending_verifications: Dict[int, Dict] = {}
+VERIFY_ATTEMPT_LIMIT = 3  # 圖片算術驗證碼最大嘗試次數，超過需管理員手動處理
 user_welcomed: Dict[Tuple[int, int], bool] = {}
 active_referendums: Dict[int, Dict] = {}        # chat_id -> 全員禁言公投狀態
 active_proposals: Dict[int, Dict] = {}          # chat_id -> 自訂提案狀態
@@ -370,6 +375,7 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
             # 檢查用戶簡介
             bio = ""
             is_suspicious = False
+            hard_block = False
             reasons = []
             if feature_enabled(known_groups.get(chat.id, {}), "profile_check"):
                 try:
@@ -390,6 +396,7 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     reasons.append("網址/連結")
 
                 # 用戶名／暱稱／簡介直接對廣告模板庫掃描（L1 正則 + L2 TF-IDF 相似度）
+                # 命中模板庫視為高置信度廣告帳號，標記 hard_block：不給自助驗證按鈕，只能由管理員手動解除
                 profile_fields = (
                     ("用戶名", f"@{user.username}" if user.username else ""),
                     ("暱稱", user.full_name or ""),
@@ -401,7 +408,36 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     hit, _score, hit_reason = detect_ad(field_text)
                     if hit:
                         is_suspicious = True
+                        hard_block = True
                         reasons.append(f"{field_label}命中模板庫[{hit_reason}]")
+
+            if hard_block:
+                logger.warning(f"🚫 高置信度廣告帳號: {user.id}, 原因: {reasons}")
+
+                has_perms, perm_msg = await check_bot_permissions(context.bot, chat.id)
+                if not has_perms:
+                    await context.bot.send_message(
+                        chat.id,
+                        f"⚠️ 檢測到高置信度廣告帳號但權限不足\n{perm_msg}",
+                        parse_mode="HTML"
+                    )
+                    return
+
+                try:
+                    await context.bot.restrict_chat_member(
+                        chat_id=chat.id,
+                        user_id=user.id,
+                        permissions=create_simple_mute_permissions(),
+                    )
+                    await context.bot.send_message(
+                        chat.id,
+                        f"🚫 {user.mention_html()} 用戶名/暱稱/簡介直接命中廣告模板庫（{', '.join(reasons)}），"
+                        f"已直接禁言，不提供自助驗證，需管理員手動確認後解除。",
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    logger.error(f"高置信度廣告帳號禁言失敗: {e}")
+                return
 
             if is_suspicious:
                 logger.info(f"⚠️ 可疑用戶: {user.id}, 原因: {reasons}")
@@ -422,31 +458,35 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         user_id=user.id,
                         permissions=create_simple_mute_permissions(),
                     )
-                    
+
+                    captcha_img, answer = generate_math_captcha()
+                    options = _generate_captcha_options(answer)
+
                     # 記錄待驗證信息
                     pending_verifications[user.id] = {
                         "chat_id": chat.id,
                         "user_name": user.mention_html(),
                         "reasons": reasons,
                         "timestamp": time.time(),
-                        "needs_welcome": True  # 標記需要歡迎
+                        "needs_welcome": True,  # 標記需要歡迎
+                        "captcha_answer": answer,
+                        "attempts": 0,
                     }
-                    
-                    # 發送驗證按鈕
+
                     keyboard = [[
-                        InlineKeyboardButton(
-                            "✅ 我是真人，點擊驗證",
-                            callback_data=f"verify_{user.id}"
-                        )
+                        InlineKeyboardButton(str(opt), callback_data=f"captcha_{user.id}_{opt}")
+                        for opt in options
                     ]]
-                    
-                    await context.bot.send_message(
+
+                    await context.bot.send_photo(
                         chat.id,
-                        f"⚠️ {user.mention_html()} 需要人機驗證（{', '.join(reasons)}）",
+                        photo=captcha_img,
+                        caption=f"⚠️ {user.mention_html()} 需要人機驗證（{', '.join(reasons)}）\n"
+                                f"請點選圖片中算式的正確答案（{VERIFY_ATTEMPT_LIMIT} 次機會，30 分鐘內有效）",
                         reply_markup=InlineKeyboardMarkup(keyboard),
                         parse_mode="HTML"
                     )
-                    
+
                 except Exception as e:
                     logger.error(f"禁言失敗: {e}")
             
@@ -462,6 +502,177 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     
     except Exception as e:
         logger.error(f"處理成員失敗: {e}")
+
+# ================== 圖片算術驗證碼 ==================
+def _load_captcha_font(size: int):
+    """嘗試載入系統字型，找不到就退回 Pillow 內建字型。"""
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                pass
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def generate_math_captcha():
+    """產生一題簡單算術驗證碼圖片。回傳 (圖片 BytesIO, 正確答案:int)。"""
+    op = random.choice(["+", "-", "×"])
+    if op == "+":
+        a, b = random.randint(1, 20), random.randint(1, 20)
+        answer = a + b
+    elif op == "-":
+        a, b = random.randint(1, 20), random.randint(1, 20)
+        if a < b:
+            a, b = b, a
+        answer = a - b
+    else:
+        a, b = random.randint(2, 9), random.randint(2, 9)
+        answer = a * b
+
+    text = f"{a} {op} {b} = ?"
+    width, height = 220, 90
+    img = Image.new("RGB", (width, height), color=(250, 250, 250))
+    draw = ImageDraw.Draw(img)
+
+    # 干擾線
+    for _ in range(6):
+        x1, y1 = random.randint(0, width), random.randint(0, height)
+        x2, y2 = random.randint(0, width), random.randint(0, height)
+        draw.line((x1, y1, x2, y2), fill=tuple(random.randint(160, 210) for _ in range(3)), width=1)
+
+    # 干擾點
+    for _ in range(100):
+        x, y = random.randint(0, width), random.randint(0, height)
+        draw.point((x, y), fill=tuple(random.randint(160, 210) for _ in range(3)))
+
+    font = _load_captcha_font(34)
+    x_cursor = 15
+    for ch in text:
+        y_offset = random.randint(-6, 6)
+        color = tuple(random.randint(10, 90) for _ in range(3))
+        draw.text((x_cursor, 25 + y_offset), ch, font=font, fill=color)
+        x_cursor += 22 if ch != " " else 12
+
+    buf = io.BytesIO()
+    buf.name = "captcha.png"
+    img.save(buf, "PNG")
+    buf.seek(0)
+    return buf, answer
+
+
+def _generate_captcha_options(answer: int, count: int = 4) -> list:
+    """產生含正確答案在內、隨機排序的選項清單。"""
+    options = {answer}
+    while len(options) < count:
+        delta = random.choice([-6, -5, -4, -3, -2, -1, 1, 2, 3, 4, 5, 6])
+        candidate = answer + delta
+        if candidate >= 0:
+            options.add(candidate)
+    options = list(options)
+    random.shuffle(options)
+    return options
+
+
+async def on_captcha_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """處理圖片算術驗證碼的選項按鈕（captcha_{user_id}_{選項}）。"""
+    query = update.callback_query
+    if not query:
+        return
+
+    await query.answer()
+
+    try:
+        parts = query.data.split("_")
+        if len(parts) != 3:
+            return
+        user_id = int(parts[1])
+        selected = int(parts[2])
+
+        if user_id not in pending_verifications:
+            await query.answer("驗證已過期或無效", show_alert=True)
+            return
+
+        verify_info = pending_verifications[user_id]
+        chat_id = verify_info["chat_id"]
+
+        if query.from_user.id != user_id:
+            await query.answer("這不是你的驗證！", show_alert=True)
+            return
+
+        if time.time() - verify_info["timestamp"] > 1800:
+            await query.edit_message_caption(caption="❌ 驗證已過期（超過30分鐘）", reply_markup=None)
+            del pending_verifications[user_id]
+            return
+
+        if selected != verify_info.get("captcha_answer"):
+            verify_info["attempts"] = verify_info.get("attempts", 0) + 1
+            if verify_info["attempts"] >= VERIFY_ATTEMPT_LIMIT:
+                del pending_verifications[user_id]
+                await query.edit_message_caption(
+                    caption=f"❌ 已達最大嘗試次數（{VERIFY_ATTEMPT_LIMIT}次），請聯繫管理員手動處理。",
+                    reply_markup=None,
+                )
+                return
+
+            # 答錯，重新出題
+            captcha_img, answer = generate_math_captcha()
+            options = _generate_captcha_options(answer)
+            verify_info["captcha_answer"] = answer
+            remaining = VERIFY_ATTEMPT_LIMIT - verify_info["attempts"]
+
+            keyboard = [[
+                InlineKeyboardButton(str(opt), callback_data=f"captcha_{user_id}_{opt}")
+                for opt in options
+            ]]
+            await query.edit_message_caption(caption=f"❌ 答錯了（剩餘 {remaining} 次機會），請見下方新題目", reply_markup=None)
+            await context.bot.send_photo(
+                chat_id,
+                photo=captcha_img,
+                caption=f"請點選正確答案（剩餘 {remaining} 次機會）",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        # 答對，解除禁言
+        try:
+            permissions = create_simple_unmute_permissions()
+            await context.bot.restrict_chat_member(
+                chat_id=chat_id,
+                user_id=user_id,
+                permissions=permissions,
+            )
+            del pending_verifications[user_id]
+
+            if verify_info.get("needs_welcome", False):
+                await send_welcome_message(
+                    context.bot,
+                    chat_id,
+                    user_id,
+                    query.from_user.mention_html(),
+                    force_send=True
+                )
+
+            await query.edit_message_caption(
+                caption=f"✅ {query.from_user.mention_html()} 驗證成功！已恢復所有權限。",
+                parse_mode="HTML",
+                reply_markup=None,
+            )
+        except Exception as e:
+            logger.error(f"解除禁言失敗: {e}")
+            await query.edit_message_caption(caption=f"❌ 解除禁言失敗: {str(e)[:100]}", reply_markup=None)
+
+    except Exception as e:
+        logger.error(f"圖片驗證碼處理失敗: {e}")
+
 
 # ================== 驗證按鈕處理 ==================
 async def on_verify_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1477,9 +1688,11 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg_wait = await update.message.reply_text("🔄 正在更新，請稍候...", parse_mode="HTML")
 
     try:
+        repo_dir = os.path.dirname(os.path.abspath(__file__))
         result = subprocess.run(
             ["git", "pull", "origin", "main"],
-            capture_output=True, text=True, timeout=30
+            capture_output=True, text=True, timeout=30,
+            cwd=repo_dir,
         )
         output = result.stdout.strip()
         error = result.stderr.strip()
@@ -1488,8 +1701,14 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(_delete_after(msg_wait, 0))
 
         if result.returncode != 0:
+            diag = (
+                f"repo_dir={repo_dir}\n"
+                f"os.getcwd()={os.getcwd()}\n"
+                f"git={shutil.which('git')}\n"
+                f"PATH={os.environ.get('PATH', '')}"
+            )
             await update.message.reply_text(
-                f"❌ 更新失敗\n\n stderr: {error}\n stdout: {output}",
+                f"❌ 更新失敗\n\n stderr: {error}\n stdout: {output}\n\n🔍 診斷資訊：\n{diag}",
                 parse_mode="HTML"
             )
             return
@@ -1534,9 +1753,11 @@ async def updatead_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         # 先 git pull 拉取最新代碼
+        repo_dir = os.path.dirname(os.path.abspath(__file__))
         result = subprocess.run(
             ["git", "pull", "origin", "main"],
-            capture_output=True, text=True, timeout=30
+            capture_output=True, text=True, timeout=30,
+            cwd=repo_dir,
         )
         output = result.stdout.strip()
         error = result.stderr.strip()
@@ -1545,8 +1766,14 @@ async def updatead_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(_delete_after(msg_wait, 0))
 
         if result.returncode != 0:
+            diag = (
+                f"repo_dir={repo_dir}\n"
+                f"os.getcwd()={os.getcwd()}\n"
+                f"git={shutil.which('git')}\n"
+                f"PATH={os.environ.get('PATH', '')}"
+            )
             await update.message.reply_text(
-                f"❌ git pull 失敗\n\n stderr: {error}\n stdout: {output}",
+                f"❌ git pull 失敗\n\n stderr: {error}\n stdout: {output}\n\n🔍 診斷資訊：\n{diag}",
                 parse_mode="HTML"
             )
             return
@@ -2227,6 +2454,7 @@ def main():
     application.add_handler(CallbackQueryHandler(on_proposal_setup,  pattern=r"^propsetup_"))
     application.add_handler(CallbackQueryHandler(on_proposal_vote,   pattern=r"^prop_"))
     application.add_handler(CallbackQueryHandler(on_referendum_vote, pattern=r"^ref_"))
+    application.add_handler(CallbackQueryHandler(on_captcha_click, pattern=r"^captcha_"))
     application.add_handler(CallbackQueryHandler(on_verify_click))
     
     application.add_handler(ChatMemberHandler(
