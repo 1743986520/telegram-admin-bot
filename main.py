@@ -68,6 +68,7 @@ pending_sample_actions: Dict[Tuple[int, int], str] = {}  # (chat_id, user_id) ->
 consumed_sample_messages = set()  # (chat_id, message_id)，避免樣本輸入再進廣告偵測
 pending_false_positive_samples: Dict[str, dict] = {}  # token -> {"text","chat_id","user_id"}
 active_tests: set = set()  # (chat_id, user_id)，/test 後持續測試直到 /stop
+pending_guard_kick: Dict[int, dict] = {}  # chat_id -> {"users": {user_id: name}, "selected": set(user_id,...)}
 
 # ================== 權限設定 ==================
 def create_simple_mute_permissions():
@@ -359,6 +360,24 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if old_status in ["left", "kicked"] and new_status == "member":
             logger.info(f"👤 新成員: {user.full_name} (ID: {user.id}) 加入 {chat.title}")
 
+            # 🛡 防護模式：完全靜默，不發任何提示，直接關閉所有權限並記錄名單，關閉時再統一處理
+            if known_groups.get(chat.id, {}).get("guard_mode", False):
+                try:
+                    await context.bot.restrict_chat_member(
+                        chat_id=chat.id,
+                        user_id=user.id,
+                        permissions=create_simple_mute_permissions(),
+                    )
+                except Exception as e:
+                    logger.error(f"防護模式禁言失敗 chat={chat.id} user={user.id}: {e}")
+                known_groups[chat.id].setdefault("guard_joined", []).append({
+                    "id": user.id,
+                    "name": user.full_name or str(user.id),
+                })
+                save_known_groups()
+                logger.info(f"🛡 防護模式：新成員 {user.id} 已靜默禁言並記錄（{chat.id}）")
+                return
+
             # 🚨 鎖群模式：直接禁言，不歡迎、不簡介檢測、不發驗證按鈕，保持安靜
             if known_groups.get(chat.id, {}).get("lockdown", False):
                 try:
@@ -394,6 +413,12 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 if re.search(r"https?://|t\.me/", bio, re.IGNORECASE):
                     is_suspicious = True
                     reasons.append("網址/連結")
+
+                # 非中文名稱（純英文或其他非中文字元），群組情境下視為軟性可疑訊號
+                display_name = user.full_name or ""
+                if display_name.strip() and not re.search(r"[\u4e00-\u9fff]", display_name):
+                    is_suspicious = True
+                    reasons.append("非中文名稱")
 
                 # 用戶名／暱稱／簡介直接對廣告模板庫掃描（L1 正則 + L2 TF-IDF 相似度）
                 # 命中模板庫視為高置信度廣告帳號，標記 hard_block：不給自助驗證按鈕，只能由管理員手動解除
@@ -1496,7 +1521,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/cleanupads - 整理並去除廣告樣本重複項\n"
         "/test - 開始逐則測試（/stop 結束）\n"
         "/omg - 炸群應急鎖群（禁言所有新加入者，/stop 解除）\n"
-        "/stop - 停止測試模式 / 解除鎖群模式",
+        "/guard - 防護模式（靜默禁言新加入者並記錄名單，/stop 解除後可選擇踢出）\n"
+        "/stop - 停止測試模式 / 解除鎖群或防護模式",
         parse_mode="HTML",
         reply_markup=build_help_keyboard(),
     )
@@ -1551,8 +1577,159 @@ async def omg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def guard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/guard：防護模式。開啟後，在收到 /stop 前，所有新加入成員會被完全靜默地關閉所有權限
+    （不發送任何提示訊息），並記錄名單；關閉時可選擇是否要把這段期間加入的人踢出。"""
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not message or not chat or not user:
+        return
+    if chat.type not in ("group", "supergroup"):
+        await message.reply_text("❌ 此指令僅在群組中可用！")
+        return
+    if not await is_group_admin(context.bot, chat.id, user.id):
+        await message.reply_text("❌ 只有本群管理員可以啟用防護模式。")
+        return
+
+    has_perms, perm_msg = await check_bot_permissions(context.bot, chat.id)
+    if not has_perms:
+        await message.reply_text(
+            f"❌ 權限檢查失敗！\n{perm_msg}\n\n請確認機器人有「限制成員」權限（同時涵蓋禁言與踢出）。",
+            parse_mode="HTML",
+        )
+        return
+
+    known_groups.setdefault(chat.id, {"title": chat.title or str(chat.id), "status": "active"})
+    known_groups[chat.id]["title"] = chat.title or str(chat.id)
+    known_groups[chat.id]["guard_mode"] = True
+    known_groups[chat.id]["guard_joined"] = []
+    save_known_groups()
+
+    logger.warning(f"🛡 防護模式已由 {user.id} 於群組 {chat.id} 啟動")
+    await message.reply_text(
+        "🛡 <b>防護模式已啟動</b>\n\n"
+        "在收到 /stop 之前：\n"
+        "• 所有新加入成員將被直接關閉所有權限\n"
+        "• 完全靜默，不發送任何提示或驗證訊息\n"
+        "• 名單會被記錄下來，關閉時可選擇要不要踢出\n\n"
+        "確認情況解除後，請管理員執行 /stop。",
+        parse_mode="HTML",
+    )
+
+
+def _build_guard_pick_keyboard(chat_id: int, info: dict) -> InlineKeyboardMarkup:
+    rows = []
+    for uid, name in info["users"].items():
+        mark = "✅" if uid in info["selected"] else "☐"
+        label = f"{mark} {name}"
+        if len(label) > 60:
+            label = label[:57] + "..."
+        rows.append([InlineKeyboardButton(label, callback_data=f"guardsel_{chat_id}_{uid}")])
+    rows.append([
+        InlineKeyboardButton("👢 踢出已選中", callback_data=f"guardexec_selected_{chat_id}"),
+        InlineKeyboardButton("👢 踢出未選中", callback_data=f"guardexec_unselected_{chat_id}"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _execute_guard_kick(bot, chat_id: int, user_ids: list) -> Tuple[int, int]:
+    """踢出指定用戶（ban 後立即 unban，允許之後重新加入）。回傳 (成功數, 失敗數)。"""
+    success, failed = 0, 0
+    for uid in user_ids:
+        try:
+            await bot.ban_chat_member(chat_id, uid)
+            await bot.unban_chat_member(chat_id, uid)
+            success += 1
+        except Exception as e:
+            logger.error(f"防護模式踢出失敗 chat={chat_id} user={uid}: {e}")
+            failed += 1
+    return success, failed
+
+
+async def on_guard_kick_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """處理防護模式關閉後「全部踢出／挑選踢出／不踢出」及挑選介面的按鈕。"""
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    await query.answer()
+
+    chat = query.message.chat if query.message else None
+    if not chat or not await is_group_admin(context.bot, chat.id, query.from_user.id):
+        await query.answer("只有本群管理員能操作", show_alert=True)
+        return
+
+    data = query.data
+
+    if data.startswith("guardkick_all_"):
+        chat_id = int(data.split("_")[2])
+        info = pending_guard_kick.pop(chat_id, None)
+        if not info:
+            await query.edit_message_text("❌ 這份名單已過期或已處理。", reply_markup=None)
+            return
+        success, failed = await _execute_guard_kick(context.bot, chat_id, list(info["users"].keys()))
+        text = f"👢 已踢出 {success} 人"
+        if failed:
+            text += f"，{failed} 人踢出失敗（可能已離群或權限不足）"
+        await query.edit_message_text(text, reply_markup=None)
+        return
+
+    if data.startswith("guardkick_none_"):
+        chat_id = int(data.split("_")[2])
+        pending_guard_kick.pop(chat_id, None)
+        await query.edit_message_text("🚫 已保留不踢出，這些成員維持禁言狀態，請自行手動處理。", reply_markup=None)
+        return
+
+    if data.startswith("guardkick_pick_"):
+        chat_id = int(data.split("_")[2])
+        info = pending_guard_kick.get(chat_id)
+        if not info:
+            await query.edit_message_text("❌ 這份名單已過期或已處理。", reply_markup=None)
+            return
+        await query.edit_message_text(
+            f"🗂 挑選要踢出的成員（共 {len(info['users'])} 人，預設全選）\n"
+            f"點名字可切換選取／取消，選好後點下方按鈕執行。",
+            reply_markup=_build_guard_pick_keyboard(chat_id, info),
+        )
+        return
+
+    if data.startswith("guardsel_"):
+        _, chat_id_str, uid_str = data.split("_")
+        chat_id, uid = int(chat_id_str), int(uid_str)
+        info = pending_guard_kick.get(chat_id)
+        if not info:
+            await query.answer("這份名單已過期", show_alert=True)
+            return
+        if uid in info["selected"]:
+            info["selected"].discard(uid)
+        else:
+            info["selected"].add(uid)
+        await query.edit_message_reply_markup(reply_markup=_build_guard_pick_keyboard(chat_id, info))
+        return
+
+    if data.startswith("guardexec_selected_") or data.startswith("guardexec_unselected_"):
+        mode_selected = data.startswith("guardexec_selected_")
+        chat_id = int(data.rsplit("_", 1)[1])
+        info = pending_guard_kick.pop(chat_id, None)
+        if not info:
+            await query.edit_message_text("❌ 這份名單已過期或已處理。", reply_markup=None)
+            return
+        all_ids = set(info["users"].keys())
+        target_ids = info["selected"] if mode_selected else (all_ids - info["selected"])
+        if not target_ids:
+            await query.edit_message_text("ℹ️ 沒有選中任何人，未執行踢出。", reply_markup=None)
+            return
+        success, failed = await _execute_guard_kick(context.bot, chat_id, list(target_ids))
+        text = f"👢 已踢出 {success} 人"
+        if failed:
+            text += f"，{failed} 人踢出失敗（可能已離群或權限不足）"
+        await query.edit_message_text(text, reply_markup=None)
+        return
+
+
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/stop：停止目前使用者的持續測試模式；群組中若鎖群模式（/omg）啟動中，管理員可一併解除。"""
+    """/stop：停止目前使用者的持續測試模式；群組中若鎖群模式（/omg）或防護模式（/guard）啟動中，
+    管理員可一併解除；防護模式解除時，若期間有新成員加入，會另外彈出處理選項。"""
     message = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
@@ -1560,17 +1737,50 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     active_tests.discard((chat.id, user.id))
 
-    if chat.type in ("group", "supergroup") and known_groups.get(chat.id, {}).get("lockdown", False):
-        if not await is_group_admin(context.bot, chat.id, user.id):
-            await message.reply_text("🛑 已停止測試模式。\n❌ 鎖群模式仍在運作中，僅本群管理員可解除。")
-            return
-        known_groups[chat.id]["lockdown"] = False
-        save_known_groups()
-        logger.warning(f"🔓 鎖群模式已由 {user.id} 於群組 {chat.id} 解除")
-        await message.reply_text("🛑 已停止測試模式。\n🔓 鎖群模式已解除，新加入成員恢復正常入群檢測流程。")
+    group_info = known_groups.get(chat.id, {})
+    lockdown_active = group_info.get("lockdown", False)
+    guard_active = group_info.get("guard_mode", False)
+
+    if chat.type not in ("group", "supergroup") or not (lockdown_active or guard_active):
+        await message.reply_text("🛑 已停止測試模式。")
         return
 
-    await message.reply_text("🛑 已停止測試模式。")
+    if not await is_group_admin(context.bot, chat.id, user.id):
+        await message.reply_text("🛑 已停止測試模式。\n❌ 鎖群/防護模式仍在運作中，僅本群管理員可解除。")
+        return
+
+    lines = ["🛑 已停止測試模式。"]
+
+    if lockdown_active:
+        known_groups[chat.id]["lockdown"] = False
+        logger.warning(f"🔓 鎖群模式已由 {user.id} 於群組 {chat.id} 解除")
+        lines.append("🔓 鎖群模式已解除，新加入成員恢復正常入群檢測流程。")
+
+    joined = []
+    if guard_active:
+        known_groups[chat.id]["guard_mode"] = False
+        joined = known_groups[chat.id].get("guard_joined", [])
+        known_groups[chat.id]["guard_joined"] = []
+        logger.warning(f"🛡 防護模式已由 {user.id} 於群組 {chat.id} 解除，期間共 {len(joined)} 人加入")
+        lines.append(f"🛡 防護模式已解除（期間共 {len(joined)} 人加入）。")
+
+    save_known_groups()
+    await message.reply_text("\n".join(lines))
+
+    if joined:
+        pending_guard_kick[chat.id] = {
+            "users": {u["id"]: u["name"] for u in joined},
+            "selected": set(u["id"] for u in joined),  # 預設全選
+        }
+        keyboard = [[
+            InlineKeyboardButton("👢 全部踢出", callback_data=f"guardkick_all_{chat.id}"),
+            InlineKeyboardButton("🗂 挑選踢出", callback_data=f"guardkick_pick_{chat.id}"),
+            InlineKeyboardButton("🚫 不踢出", callback_data=f"guardkick_none_{chat.id}"),
+        ]]
+        await message.reply_text(
+            f"防護模式期間加入的 {len(joined)} 人要怎麼處理？",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
 
 
 async def test_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2436,6 +2646,7 @@ def main():
     application.add_handler(CommandHandler("test", test_command))
     application.add_handler(CommandHandler("stop", stop_command))
     application.add_handler(CommandHandler("omg", omg_command))
+    application.add_handler(CommandHandler("guard", guard_command))
 
     # 鎖群模式（/omg）：刪除「OO加入了群組」系統訊息
     application.add_handler(MessageHandler(
@@ -2461,6 +2672,7 @@ def main():
     application.add_handler(CallbackQueryHandler(on_proposal_vote,   pattern=r"^prop_"))
     application.add_handler(CallbackQueryHandler(on_referendum_vote, pattern=r"^ref_"))
     application.add_handler(CallbackQueryHandler(on_captcha_click, pattern=r"^captcha_"))
+    application.add_handler(CallbackQueryHandler(on_guard_kick_click, pattern=r"^guard(kick|sel|exec)_"))
     application.add_handler(CallbackQueryHandler(on_verify_click))
     
     application.add_handler(ChatMemberHandler(
