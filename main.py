@@ -378,19 +378,6 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 logger.info(f"🛡 防護模式：新成員 {user.id} 已靜默禁言並記錄（{chat.id}）")
                 return
 
-            # 🚨 鎖群模式：直接禁言，不歡迎、不簡介檢測、不發驗證按鈕，保持安靜
-            if known_groups.get(chat.id, {}).get("lockdown", False):
-                try:
-                    await context.bot.restrict_chat_member(
-                        chat_id=chat.id,
-                        user_id=user.id,
-                        permissions=create_simple_mute_permissions(),
-                    )
-                    logger.info(f"🚨 鎖群模式：新成員 {user.id} 已直接禁言（{chat.id}）")
-                except Exception as e:
-                    logger.error(f"鎖群模式禁言失敗 chat={chat.id} user={user.id}: {e}")
-                return
-
             # 檢查用戶簡介
             bio = ""
             is_suspicious = False
@@ -1520,9 +1507,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/exportsamples - 匯出樣本庫\n"
         "/cleanupads - 整理並去除廣告樣本重複項\n"
         "/test - 開始逐則測試（/stop 結束）\n"
-        "/omg - 炸群應急鎖群（禁言所有新加入者，/stop 解除）\n"
-        "/guard - 防護模式（靜默禁言新加入者並記錄名單，/stop 解除後可選擇踢出）\n"
-        "/stop - 停止測試模式 / 解除鎖群或防護模式",
+        "/guard - 防護模式（別名 /omg，靜默禁言新加入者並記錄名單，/stop 解除後可選擇踢出）\n"
+        "/stop - 停止測試模式 / 解除防護模式",
         parse_mode="HTML",
         reply_markup=build_help_keyboard(),
     )
@@ -1538,48 +1524,10 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await message.reply_text("🧪 已開始測試模式。請逐則傳送文字；輸入 /stop 結束。")
 
 
-async def omg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/omg：炸群應急鎖群模式。開啟後，在收到 /stop 前，所有新加入成員一律先禁言、保持安靜。"""
-    message = update.effective_message
-    chat = update.effective_chat
-    user = update.effective_user
-    if not message or not chat or not user:
-        return
-    if chat.type not in ("group", "supergroup"):
-        await message.reply_text("❌ 此指令僅在群組中可用！")
-        return
-    if not await is_group_admin(context.bot, chat.id, user.id):
-        await message.reply_text("❌ 只有本群管理員可以啟用鎖群模式。")
-        return
-
-    has_perms, perm_msg = await check_bot_permissions(context.bot, chat.id)
-    if not has_perms:
-        await message.reply_text(
-            f"❌ 權限檢查失敗！\n{perm_msg}\n\n請確認機器人有「限制成員」與「刪除訊息」權限。",
-            parse_mode="HTML",
-        )
-        return
-
-    known_groups.setdefault(chat.id, {"title": chat.title or str(chat.id), "status": "active"})
-    known_groups[chat.id]["title"] = chat.title or str(chat.id)
-    known_groups[chat.id]["lockdown"] = True
-    save_known_groups()
-
-    logger.warning(f"🚨 鎖群模式已由 {user.id} 於群組 {chat.id} 啟動")
-    await message.reply_text(
-        "🚨 <b>鎖群模式已啟動</b>\n\n"
-        "在收到 /stop 之前：\n"
-        "• 所有新加入成員將直接禁言，不做簡介/廣告判斷\n"
-        "• 不發歡迎訊息、不發驗證按鈕，保持安靜\n"
-        "• 「OO加入了群組」系統訊息會被自動刪除\n\n"
-        "確認情況解除後，請管理員執行 /stop 解鎖。",
-        parse_mode="HTML",
-    )
-
-
 async def guard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/guard：防護模式。開啟後，在收到 /stop 前，所有新加入成員會被完全靜默地關閉所有權限
-    （不發送任何提示訊息），並記錄名單；關閉時可選擇是否要把這段期間加入的人踢出。"""
+    """/guard（別名 /omg）：防護模式。開啟後，在收到 /stop 前，所有新加入成員會被完全靜默地
+    關閉所有權限（不發送任何提示訊息，「OO加入了群組」系統訊息也會自動刪除），並記錄名單；
+    關閉時可選擇是否要把這段期間加入的人踢出。"""
     message = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
@@ -1612,6 +1560,7 @@ async def guard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "在收到 /stop 之前：\n"
         "• 所有新加入成員將被直接關閉所有權限\n"
         "• 完全靜默，不發送任何提示或驗證訊息\n"
+        "• 「OO加入了群組」系統訊息會被自動刪除\n"
         "• 名單會被記錄下來，關閉時可選擇要不要踢出\n\n"
         "確認情況解除後，請管理員執行 /stop。",
         parse_mode="HTML",
@@ -1728,8 +1677,8 @@ async def on_guard_kick_click(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/stop：停止目前使用者的持續測試模式；群組中若鎖群模式（/omg）或防護模式（/guard）啟動中，
-    管理員可一併解除；防護模式解除時，若期間有新成員加入，會另外彈出處理選項。"""
+    """/stop：停止目前使用者的持續測試模式；群組中若防護模式（/guard，別名 /omg）啟動中，
+    本群管理員可一併解除；若期間有新成員加入，會另外彈出處理選項。"""
     message = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
@@ -1738,34 +1687,24 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_tests.discard((chat.id, user.id))
 
     group_info = known_groups.get(chat.id, {})
-    lockdown_active = group_info.get("lockdown", False)
     guard_active = group_info.get("guard_mode", False)
 
-    if chat.type not in ("group", "supergroup") or not (lockdown_active or guard_active):
+    if chat.type not in ("group", "supergroup") or not guard_active:
         await message.reply_text("🛑 已停止測試模式。")
         return
 
     if not await is_group_admin(context.bot, chat.id, user.id):
-        await message.reply_text("🛑 已停止測試模式。\n❌ 鎖群/防護模式仍在運作中，僅本群管理員可解除。")
+        await message.reply_text("🛑 已停止測試模式。\n❌ 防護模式仍在運作中，僅本群管理員可解除。")
         return
 
-    lines = ["🛑 已停止測試模式。"]
-
-    if lockdown_active:
-        known_groups[chat.id]["lockdown"] = False
-        logger.warning(f"🔓 鎖群模式已由 {user.id} 於群組 {chat.id} 解除")
-        lines.append("🔓 鎖群模式已解除，新加入成員恢復正常入群檢測流程。")
-
-    joined = []
-    if guard_active:
-        known_groups[chat.id]["guard_mode"] = False
-        joined = known_groups[chat.id].get("guard_joined", [])
-        known_groups[chat.id]["guard_joined"] = []
-        logger.warning(f"🛡 防護模式已由 {user.id} 於群組 {chat.id} 解除，期間共 {len(joined)} 人加入")
-        lines.append(f"🛡 防護模式已解除（期間共 {len(joined)} 人加入）。")
-
+    known_groups[chat.id]["guard_mode"] = False
+    joined = known_groups[chat.id].get("guard_joined", [])
+    known_groups[chat.id]["guard_joined"] = []
+    logger.warning(f"🛡 防護模式已由 {user.id} 於群組 {chat.id} 解除，期間共 {len(joined)} 人加入")
     save_known_groups()
-    await message.reply_text("\n".join(lines))
+
+    await message.reply_text(f"🛑 已停止測試模式。\n🛡 防護模式已解除（期間共 {len(joined)} 人加入）。")
+
 
     if joined:
         pending_guard_kick[chat.id] = {
@@ -2424,17 +2363,17 @@ async def handle_sample_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         await message.reply_text(f"⚠️ 已寫入樣本庫，但熱重載失敗：{e}")
 
 async def handle_new_member_service_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """鎖群模式（/omg）下，刪除「OO加入了群組」系統訊息，保持安靜。"""
+    """防護模式（/guard）下，刪除「OO加入了群組」系統訊息，保持安靜。"""
     message = update.effective_message
     chat = update.effective_chat
     if not message or not chat:
         return
-    if not known_groups.get(chat.id, {}).get("lockdown", False):
+    if not known_groups.get(chat.id, {}).get("guard_mode", False):
         return
     try:
         await message.delete()
     except Exception as e:
-        logger.warning(f"鎖群模式刪除入群訊息失敗 chat={chat.id}: {e}")
+        logger.warning(f"防護模式刪除入群訊息失敗 chat={chat.id}: {e}")
 
 
 async def get_all_admins(bot, chat_id: int) -> list:
@@ -2645,10 +2584,10 @@ def main():
     application.add_handler(CommandHandler("cleanupads", cleanup_ads_command))
     application.add_handler(CommandHandler("test", test_command))
     application.add_handler(CommandHandler("stop", stop_command))
-    application.add_handler(CommandHandler("omg", omg_command))
+    application.add_handler(CommandHandler("omg", guard_command))
     application.add_handler(CommandHandler("guard", guard_command))
 
-    # 鎖群模式（/omg）：刪除「OO加入了群組」系統訊息
+    # 防護模式（/guard、別名 /omg）：刪除「OO加入了群組」系統訊息
     application.add_handler(MessageHandler(
         filters.StatusUpdate.NEW_CHAT_MEMBERS,
         handle_new_member_service_message,
