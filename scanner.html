@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>話術顯影室 — 廣告偵測引擎展示</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0c0a0a;
+    --bg-2:#120f0e;
+    --panel:#181413;
+    --panel-2:#1f1a18;
+    --border:#332c28;
+    --paper:#f2efe9;
+    --stone:#a89d8f;
+    --stone-dim:#726a61;
+    --safelight:#e63946;
+    --safelight-dim:#7a2229;
+    --amber:#e3b94e;
+    --jade:#6fbf8b;
+    --serif:'Noto Serif SC', serif;
+    --sans:'Inter', -apple-system, sans-serif;
+    --mono:'IBM Plex Mono', ui-monospace, monospace;
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;
+    background:
+      radial-gradient(1200px 600px at 15% -10%, #1a1210 0%, transparent 60%),
+      radial-gradient(900px 500px at 100% 10%, #150f0e 0%, transparent 55%),
+      var(--bg);
+    color:var(--paper);
+    font-family:var(--sans);
+    line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:inherit;}
+  ::selection{background:var(--safelight-dim); color:var(--paper);}
+
+  /* ---------- layout shells ---------- */
+  .wrap{max-width:920px; margin:0 auto; padding:0 24px;}
+  header.top{padding:28px 0 8px;}
+  .brand{display:flex; align-items:baseline; gap:10px;}
+  .brand .mark{
+    width:10px; height:10px; border-radius:50%;
+    background:var(--safelight);
+    box-shadow:0 0 12px 2px var(--safelight-dim);
+    display:inline-block;
+  }
+  .brand span{font-family:var(--mono); font-size:13px; letter-spacing:.12em; color:var(--stone); text-transform:uppercase;}
+
+  .hero{padding:56px 0 20px;}
+  .hero h1{
+    font-family:var(--serif);
+    font-weight:700;
+    font-size:clamp(34px, 6vw, 54px);
+    line-height:1.15;
+    margin:0 0 14px;
+    letter-spacing:.01em;
+  }
+  .hero h1 em{
+    font-style:normal;
+    color:var(--safelight);
+  }
+  .hero p.lead{
+    font-size:16px;
+    color:var(--stone);
+    max-width:56ch;
+    margin:0 0 4px;
+  }
+
+  /* ---------- scanner panel ---------- */
+  .scanner{
+    margin-top:36px;
+    background:var(--panel);
+    border:1px solid var(--border);
+    border-radius:4px;
+    overflow:hidden;
+  }
+  .scanner-head{
+    display:flex; justify-content:space-between; align-items:center;
+    padding:12px 18px;
+    border-bottom:1px solid var(--border);
+    font-family:var(--mono); font-size:12px; color:var(--stone-dim);
+    letter-spacing:.08em;
+  }
+  .scanner-head .dot-row span{
+    display:inline-block; width:7px; height:7px; border-radius:50%;
+    background:var(--border); margin-left:5px;
+  }
+  textarea#input{
+    width:100%;
+    min-height:104px;
+    background:transparent;
+    border:none;
+    resize:vertical;
+    color:var(--paper);
+    font-family:var(--sans);
+    font-size:16px;
+    padding:18px;
+    outline:none;
+  }
+  textarea#input::placeholder{color:var(--stone-dim);}
+
+  .chips{
+    display:flex; flex-wrap:wrap; gap:8px;
+    padding:0 18px 16px;
+  }
+  .chip{
+    font-family:var(--mono);
+    font-size:12px;
+    color:var(--stone);
+    background:var(--panel-2);
+    border:1px solid var(--border);
+    padding:6px 10px;
+    border-radius:3px;
+    cursor:pointer;
+    transition:border-color .15s, color .15s;
+  }
+  .chip:hover{border-color:var(--safelight-dim); color:var(--paper);}
+
+  .scan-btn-row{
+    display:flex; align-items:center; gap:14px;
+    padding:14px 18px;
+    border-top:1px solid var(--border);
+    background:var(--bg-2);
+  }
+  button#scan{
+    font-family:var(--mono);
+    font-size:13px;
+    letter-spacing:.08em;
+    background:var(--safelight);
+    color:#1a0505;
+    border:none;
+    padding:11px 20px;
+    border-radius:3px;
+    cursor:pointer;
+    font-weight:600;
+    transition:filter .15s, transform .15s;
+  }
+  button#scan:hover{filter:brightness(1.08);}
+  button#scan:active{transform:scale(.98);}
+  .scan-hint{font-size:12px; color:var(--stone-dim); font-family:var(--mono);}
+
+  /* ---------- develop stages ---------- */
+  #stages{padding:0 18px 22px; display:none;}
+  #stages.show{display:block;}
+  .stage{
+    padding:16px 0;
+    border-top:1px dashed var(--border);
+  }
+  .stage:first-child{border-top:none;}
+  .stage-label{
+    font-family:var(--mono); font-size:11px; letter-spacing:.14em;
+    color:var(--stone-dim); text-transform:uppercase; margin-bottom:8px;
+  }
+  .stage-body{
+    font-family:var(--mono);
+    font-size:14.5px;
+    line-height:1.9;
+    color:var(--stone);
+    word-break:break-word;
+    white-space:pre-wrap;
+  }
+  .stage-body .raw-ghost{
+    opacity:.35;
+    text-decoration:line-through;
+    text-decoration-color:var(--stone-dim);
+  }
+  .stage-body .obf-mark{
+    color:var(--amber);
+    border-bottom:1px dotted var(--amber);
+  }
+  .stage-body.developed{color:var(--paper); font-weight:500;}
+  .stage-body .trigger{
+    background:rgba(230,57,70,.16);
+    color:var(--safelight);
+    border:1px solid var(--safelight-dim);
+    border-radius:2px;
+    padding:1px 3px;
+    font-weight:600;
+  }
+
+  .verdict{
+    margin-top:6px;
+    padding:16px 18px;
+    border-radius:3px;
+    display:flex; align-items:center; gap:12px;
+    font-family:var(--mono); font-size:14px;
+  }
+  .verdict.hit{
+    background:rgba(230,57,70,.09);
+    border:1px solid var(--safelight-dim);
+    color:#ffb3b8;
+  }
+  .verdict.clean{
+    background:rgba(111,191,139,.08);
+    border:1px solid #2d4a3a;
+    color:var(--jade);
+  }
+  .verdict .verdict-tag{
+    font-weight:700; letter-spacing:.06em;
+  }
+  .verdict .verdict-label{
+    margin-left:auto; font-size:12px; color:var(--stone-dim);
+  }
+
+  /* ---------- stats ---------- */
+  .stats{
+    display:grid;
+    grid-template-columns:repeat(3, 1fr);
+    gap:1px;
+    background:var(--border);
+    border:1px solid var(--border);
+    border-radius:4px;
+    overflow:hidden;
+    margin:48px 0;
+  }
+  .stat{
+    background:var(--panel);
+    padding:22px 18px;
+  }
+  .stat .num{
+    font-family:var(--serif); font-size:32px; font-weight:700; color:var(--paper);
+  }
+  .stat .cap{
+    font-family:var(--mono); font-size:11.5px; color:var(--stone-dim);
+    letter-spacing:.06em; margin-top:4px;
+  }
+
+  /* ---------- techniques ---------- */
+  section.techniques h2, section.about h2{
+    font-family:var(--serif); font-size:24px; margin:0 0 6px;
+  }
+  section.techniques p.sub, section.about p.sub{
+    color:var(--stone); font-size:14.5px; margin:0 0 22px; max-width:60ch;
+  }
+  .tech-grid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:14px;
+    margin-bottom:56px;
+  }
+  .tech-card{
+    background:var(--panel);
+    border:1px solid var(--border);
+    border-radius:4px;
+    padding:16px 18px;
+  }
+  .tech-card h3{
+    font-size:14px; margin:0 0 8px; color:var(--paper);
+    display:flex; align-items:center; gap:8px;
+  }
+  .tech-card h3::before{
+    content:"";
+    width:5px; height:5px; background:var(--safelight); border-radius:50%;
+    box-shadow:0 0 6px 1px var(--safelight-dim);
+  }
+  .tech-card .ex{
+    font-family:var(--mono); font-size:12.5px; color:var(--stone-dim);
+    display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+  }
+  .tech-card .ex .arrow{color:var(--stone-dim);}
+  .tech-card .ex .after{color:var(--jade);}
+
+  section.about{margin-bottom:64px;}
+  .about-body{color:var(--stone); font-size:14.5px; max-width:68ch;}
+  .about-body strong{color:var(--paper);}
+  .limits{
+    margin-top:18px;
+    padding:14px 16px;
+    border-left:2px solid var(--amber);
+    background:rgba(227,185,78,.06);
+    font-size:13.5px;
+    color:var(--stone);
+  }
+
+  footer{
+    border-top:1px solid var(--border);
+    padding:24px 0 48px;
+    font-family:var(--mono);
+    font-size:12px;
+    color:var(--stone-dim);
+    display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;
+  }
+
+  @media (max-width:640px){
+    .stats{grid-template-columns:1fr;}
+    .tech-grid{grid-template-columns:1fr;}
+  }
+
+  @media (prefers-reduced-motion:no-preference){
+    .stage{animation:rise .35s ease both;}
+    .stage:nth-child(2){animation-delay:.12s;}
+    .stage:nth-child(3){animation-delay:.24s;}
+  }
+  @keyframes rise{
+    from{opacity:0; transform:translateY(6px);}
+    to{opacity:1; transform:translateY(0);}
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header class="top">
+    <div class="brand"><span class="mark"></span><span>Telegram Admin Bot · 廣告偵測引擎</span></div>
+  </header>
+
+  <section class="hero">
+    <h1>話術<em>顯影室</em></h1>
+    <p class="lead">拆字、諧音、零寬字元、o/O混數字——貼一句話進來，看它怎麼把偽裝沖洗掉，露出底片。</p>
+  </section>
+
+  <div class="scanner">
+    <div class="scanner-head">
+      <span>INPUT</span>
+      <span class="dot-row"><span></span><span></span><span></span></span>
+    </div>
+    <textarea id="input" placeholder="貼一句廣告話術進來，例如：看/主/叶 或 有ZFB的来10分钟三佰一单一结算">2026最.牛.最.稳.项/牧✅砍/主/叶</textarea>
+    <div class="chips" id="chips"></div>
+    <div class="scan-btn-row">
+      <button id="scan">顯影 →</button>
+      <span class="scan-hint">用的是正式版同一套 clean_text + L1 規則引擎</span>
+    </div>
+    <div id="stages"></div>
+  </div>
+
+  <div class="stats" id="stats"></div>
+
+  <section class="techniques">
+    <h2>沖洗掉的偽裝手法</h2>
+    <p class="sub">這些都是真實群組裡抓到的規避技巧，每種都有對應的還原邏輯。</p>
+    <div class="tech-grid" id="techGrid"></div>
+  </section>
+
+  <section class="about">
+    <h2>這頁面在測什麼</h2>
+    <div class="about-body">
+      <p>正式版的偵測分兩層：<strong>L1 正則規則引擎</strong>（130+ 條，命中即判定）加上 <strong>L2 TF-IDF 語義相似度</strong>（拿當前訊息去跟 269+ 條範本比對相似度）。這個頁面是純前端展示，完整搬了正式版的 <code style="font-family:var(--mono)">clean_text</code> 前處理與全部 L1 規則過來跑，跟正式版判定邏輯一致；但 L2 相似度需要載入訓練好的向量模型，沒辦法搬進純靜態網頁，所以這裡看不到的判定，不代表正式版一定也看不到。</p>
+      <div class="limits">⚠ 僅供技術展示，不會把你輸入的任何內容傳出這個頁面或存起來。</div>
+    </div>
+  </section>
+
+  <footer>
+    <span>Telegram Admin Bot — 廣告偵測引擎展示</span>
+    <span id="footStats"></span>
+  </footer>
+</div>
+
+<script>
+const DATA = {"rules": [{"pattern": "一天[0-9０-９一二三四五六七八九十百千]+万", "flags": "i", "label": "金額誘惑"}, {"pattern": "保底[0-9０-９一二三四五六七八九十百千]+万", "flags": "i", "label": "金額誘惑"}, {"pattern": "日入[0-9０-９]+", "flags": "i", "label": "金額誘惑"}, {"pattern": "月入[0-9０-９]+万", "flags": "i", "label": "金額誘惑"}, {"pattern": "提(宝马|奔驰|保时捷|大G|劳斯莱斯|玛莎拉蒂|奥迪|兰博基尼|法拉利|迈巴赫)", "flags": "i", "label": "豪車誘惑"}, {"pattern": "一周.*?(宝马|奔驰|保时捷)", "flags": "i", "label": "豪車誘惑"}, {"pattern": "看\\s*(我\\s*)?(简介|减介|简届)", "flags": "i", "label": "模糊號召"}, {"pattern": "看\\s*(我\\s*)?简\\s*介", "flags": "i", "label": "模糊號召"}, {"pattern": "(缺|招)\\s*[0-9一二三四五六七八九十几]+?\\s*(个|名|位)\\s*(兄弟|伙伴|人手)", "flags": "i", "label": "招募廣告"}, {"pattern": "上门\\s*(按摩|服务|推拿)", "flags": "i", "label": "上門服務"}, {"pattern": "同城\\s*配送", "flags": "i", "label": "上門服務"}, {"pattern": "24[Hh小时]\\s*(便民|服务|待命)", "flags": "i", "label": "上門服務"}, {"pattern": "(飞机|TG|tg).{0,8}(全行业|群发|代发|推广)", "flags": "i", "label": "TG代發"}, {"pattern": "(广告|ad).{0,8}代\\s*(发|投)", "flags": "i", "label": "TG代發"}, {"pattern": "精准\\s*引流", "flags": "i", "label": "TG代發"}, {"pattern": "覆盖\\s*(?:[0-9]+|上万|几万|数万|成千上万|数千|上千)\\s*(万|千|百|个)?\\s*(粉|群)", "flags": "i", "label": "TG代發"}, {"pattern": "(可约|约|预约)\\s*(学生妹|学生|妹子|小姐姐|少妇)", "flags": "i", "label": "色情服務"}, {"pattern": "(高端|私人)\\s*伴游", "flags": "i", "label": "色情服務"}, {"pattern": "保养\\s*(读书妹|学生妹|妹子)", "flags": "i", "label": "色情服務"}, {"pattern": "(吉隆坡|KL|大马|东南亚).{0,20}@\\w+", "flags": "i", "label": "地域引流"}, {"pattern": "(速来|来|了解|私聊|联系).{0,10}@(?!\\w*bot\\b)\\w{3,}", "flags": "i", "label": "引流@帳號"}, {"pattern": "看(简介|我).{0,5}@(?!\\w*bot\\b)\\w{3,}", "flags": "i", "label": "引流@帳號"}, {"pattern": "(GPT|ChatGPT|OpenAI).{0,20}(拒付|拒絕|扣费不稳|扣費不穩)", "flags": "i", "label": "GPT訂閱推廣"}, {"pattern": "(GPT|ChatGPT|OpenAI).{0,20}(订阅|訂閱).{0,20}(优惠|優惠|代充|包月|包年|稳定|穩定|防拒付|免拒付|量大|批发|批發|扣费|扣費)", "flags": "i", "label": "GPT訂閱推廣"}, {"pattern": "(VCC|虚拟信用卡|虛擬信用卡).{0,30}(GPT|ChatGPT|OpenAI|Claude|免开卡费|免開卡費|量大)", "flags": "i", "label": "VCC金融卡推廣"}, {"pattern": "(GPT|ChatGPT|OpenAI).{0,30}(VCC|虚拟信用卡|虛擬信用卡|免开卡费|免開卡費)", "flags": "i", "label": "GPT金融卡推廣"}, {"pattern": "[Cc]laude.{0,20}(专用卡|專用卡|扣款|丝滑|絲滑|绑定|綁定|VCC)", "flags": "i", "label": "Claude金融卡推廣"}, {"pattern": "(专用卡|專用卡).{0,15}(FB|TK|GG|[Ff]acebook|[Tt]ik[Tt]ok|谷歌|希音|亚马逊|亞馬遜|速卖通|速賣通|广告户|廣告戶)", "flags": "i", "label": "廣告投放卡推廣"}, {"pattern": "(洗\\s*[Uu✓]|洗\\s*钱).{0,20}(赚|空缺|团队)", "flags": "i", "label": "洗U灰產"}, {"pattern": "USDT\\s*(搬砖|项目|转账).{0,20}(空缺|勤快|小白)", "flags": "i", "label": "洗U灰產"}, {"pattern": "(轻\\s*灰\\s*产|灰\\s*产).{0,10}(跑通|项目|来)", "flags": "i", "label": "洗U灰產"}, {"pattern": "(免手续费|0\\.1\\s*TRX).{0,10}转\\s*[Uu]", "flags": "i", "label": "洗U灰產"}, {"pattern": "(一比一|1:1|高仿).{0,10}(假钞|假币|伪钞).{0,20}(@\\w+|娱乐|保养)", "flags": "i", "label": "假鈔廣告"}, {"pattern": "(假钞|假币|伪钞).{0,15}(真用|娱乐|保养|专用).{0,20}@\\w+", "flags": "i", "label": "假鈔廣告"}, {"pattern": "(萝莉|初中|高中|学生|未成年).{0,10}(私密|福利|色情|群).{0,20}(t\\.me|@\\w+)", "flags": "i", "label": "未成年色情"}, {"pattern": "(loli|萝莉|幼|小学生).{0,20}(群|私密|资源|福利)", "flags": "i", "label": "未成年色情"}, {"pattern": "(高仿|假|偽)\\s*(钞|钱|币|幣).{0,10}(过|過|BC|验|驗|出货|出貨)", "flags": "i", "label": "假鈔廣告"}, {"pattern": "(飞机|飛機).{0,5}(老号|老號|批发|批發).{0,15}(白菜|价格|售后)", "flags": "i", "label": "帳號販售"}, {"pattern": "(伪钞|假钞|假币).{0,20}(BC|验钞|极品).{0,20}(@\\w+|变现|嫖|赌)", "flags": "i", "label": "偽鈔廣告"}, {"pattern": "(代收|帮.*?收).{0,10}[0-9]+\\s*万.{0,15}@\\w+", "flags": "i", "label": "非法收款"}, {"pattern": "一年.{0,10}(赚|买|套房).{0,15}(兼职|副业)", "flags": "i", "label": "副業引流"}, {"pattern": "高仿\\s*钞.{0,10}(出货|检测|BC机)", "flags": "i", "label": "高仿鈔"}, {"pattern": "(高仿|高防|一比一).{0,8}(钞|币|幣).{0,15}(手感|过BC机|過BC機|过机|過機|可检测|可檢測|验钞|驗鈔)", "flags": "i", "label": "假鈔廣告"}, {"pattern": "(微信|支付宝).{0,10}帮.{0,5}收\\s*钱", "flags": "i", "label": "非法收款"}, {"pattern": "(小额|大额)?\\s*洗\\s*资.{0,15}(代收|一天|赚)", "flags": "i", "label": "洗資代收"}, {"pattern": "新\\s*风\\s*口.{0,20}(一天|日赚|做)[0-9]+", "flags": "i", "label": "新風口引流"}, {"pattern": "码\\s*多.{0,15}(吃肉|来|挣|赚)[0-9]+", "flags": "i", "label": "碼多引流"}, {"pattern": "小白.{0,10}(可做|可干|能做).{0,20}(无风险|绿色|一天|日赚)", "flags": "i", "label": "小白招募"}, {"pattern": "(无风险|零风险|绿色).{0,15}一天[0-9]+", "flags": "i", "label": "小白招募"}, {"pattern": "(抖音|快手|小红书).{0,15}(在手|单号|账号).{0,20}(日结|稳定|多劳多得).{0,20}@\\w+", "flags": "i", "label": "抖音刷量"}, {"pattern": "(单号|刷单).{0,15}(每天|日结|稳定).{0,20}@\\w+", "flags": "i", "label": "抖音刷量"}, {"pattern": "(找活|找工作|兼职).{0,15}(手机|拍照|计数|多劳多得).{0,20}@\\w+", "flags": "i", "label": "兼職詐騙"}, {"pattern": "(计数制|多劳多得|手机拍照).{0,20}@\\w+", "flags": "i", "label": "兼職詐騙"}, {"pattern": "充电宝.{0,10}(地推|投放).{0,20}(工资|日结|批量).{0,20}@\\w+", "flags": "i", "label": "充電寶投放"}, {"pattern": "(地推|批量).{0,10}投放.{0,20}(日结|工资|稳定).{0,20}@\\w+", "flags": "i", "label": "充電寶投放"}, {"pattern": "(高价|上浮).{0,10}收\\s*[Uu].{0,30}(搬砖|日赚|承兑)", "flags": "i", "label": "高價收U"}, {"pattern": "(白资|菠菜|游戏代充).{0,20}(收U|换现|先款后U)", "flags": "i", "label": "高價收U"}, {"pattern": "先款后\\s*[Uu].{0,20}(免押|搬砖|承兑).{0,20}@\\w+", "flags": "i", "label": "高價收U"}, {"pattern": "投放.{0,10}(充电宝|广告机|设备).{0,20}(佣金|日入|过万)", "flags": "i", "label": "投放詐騙"}, {"pattern": "(一台|每台).{0,10}佣金.{0,20}(日入|每天|过万).{0,20}@\\w+", "flags": "i", "label": "投放詐騙"}, {"pattern": "(vcc|虚拟信用卡|虚拟卡).{0,20}(免KYC|免\\s*kyc|成本低|出售|批发)", "flags": "i", "label": "虛擬信用卡"}, {"pattern": "(免KYC|免\\s*kyc).{0,20}(信用卡|vcc|虚拟卡)", "flags": "i", "label": "虛擬信用卡"}, {"pattern": "飞机.{0,20}(项目|做事|赚钱).{0,20}(一天|赚|万)", "flags": "i", "label": "飛機項目引流"}, {"pattern": "(白玩飞机|飞机上.*?项目|飞机.*?赚).{0,30}", "flags": "i", "label": "飛機項目引流"}, {"pattern": "(合约|期货|炒币).{0,20}(精准|预判|翻仓).{0,30}@\\w+", "flags": "i", "label": "合約喊單"}, {"pattern": "(翻仓|爆仓|止盈).{0,20}(良心|博主|一键加入).{0,20}@\\w+", "flags": "i", "label": "合約喊單"}, {"pattern": "一键加入.{0,10}@\\w+", "flags": "i", "label": "合約喊單"}, {"pattern": "(足球|篮球|世界杯|体育).{0,10}(红单|推荐|内幕).{0,20}(日赚|收米|@\\w+)", "flags": "i", "label": "博彩紅單"}, {"pattern": "(天天收米|日赚[0-9]+[千万]).{0,20}@\\w+", "flags": "i", "label": "博彩紅單"}, {"pattern": "收米.{0,15}日\\s*[0-9]+\\s*[千万]", "flags": "i", "label": "博彩紅單"}, {"pattern": "(微信|VX|vx|Vx).{0,10}收米", "flags": "i", "label": "博彩紅單"}, {"pattern": "(博彩|体育|棋牌|电竞).{0,10}(招商|代理).{0,20}(返点|扶持|福利).{0,20}@\\w+", "flags": "i", "label": "博彩招商"}, {"pattern": "(返点高|扶持强|福利高).{0,20}@\\w+", "flags": "i", "label": "博彩招商"}, {"pattern": "(限时免费|点.*?链接).{0,15}(禁忌|资源|福利)", "flags": "i", "label": "色情引流"}, {"pattern": "(酒店偷拍|情侣直播|福利姬).{0,30}(免费|搜索|看)", "flags": "i", "label": "色情引流"}, {"pattern": "(万能检索|限时免费搜).{0,20}(千万用户|资源|看)", "flags": "i", "label": "色情引流"}, {"pattern": "(源头|一手)\\s*(批发|货源|厂家).{0,15}@\\w+", "flags": "i", "label": "批發引流"}, {"pattern": "(联系方式库|号码库|资源库).{0,20}(城市|查找|@\\w+)", "flags": "i", "label": "資源庫廣告"}, {"pattern": "(小姐姐|妹子|女生).{0,10}(联系方式|号码|资源).{0,15}@\\w+", "flags": "i", "label": "資源庫廣告"}, {"pattern": "黄金.{0,10}(线下|对接|出售|回收).{0,20}(火烧|光谱|@\\w+)", "flags": "i", "label": "貴金屬交易"}, {"pattern": "(零风险|低风险).{0,15}(批发|货源|源头).{0,15}@\\w+", "flags": "i", "label": "批發引流"}, {"pattern": "(包养|保养).{0,20}(防骗|指南|担保|交易).{0,20}@\\w+", "flags": "i", "label": "包養詐騙"}, {"pattern": "(白虎|萝莉|学生妹).{0,15}(包养|担保|交易).{0,20}@\\w+", "flags": "i", "label": "包養詐騙"}, {"pattern": "可\\s*担保\\s*交易.{0,20}@\\w+", "flags": "i", "label": "包養詐騙"}, {"pattern": "(出租|租用).{0,10}(性奴|肉奴|老婆|人妻).{0,10}[0-9]+.{0,5}(次|晚|小时)", "flags": "i", "label": "性服務廣告"}, {"pattern": "(性奴|肉奴).{0,20}(出租|一次|联系|私聊)", "flags": "i", "label": "性服務廣告"}, {"pattern": "(还在打工|还在啃老).{0,20}(财富|入口|路子|简介)", "flags": "i", "label": "副業引流"}, {"pattern": "(线上客服|副业).{0,20}(回消息|结算|碎片时间|零基础)", "flags": "i", "label": "副業引流"}, {"pattern": "t\\.me/\\+[A-Za-z0-9_-]{10,}.{0,50}(免费|資源|福利|社区|群|赚|招募|引流|副业|项目)", "flags": "i", "label": "TG邀請連結"}, {"pattern": "(免费|福利|资源|赚钱|副业|项目|招募).{0,50}t\\.me/\\+[A-Za-z0-9_-]{10,}", "flags": "i", "label": "TG邀請連結"}, {"pattern": "(翻墙|搞米|有路子).{0,20}(兄弟|妹妹|看.{0,5}简介)", "flags": "i", "label": "副業引流"}, {"pattern": "(NFT|nft).{0,15}(用户名|账号|礼物|典藏).{0,20}@\\w+", "flags": "i", "label": "NFT販售"}, {"pattern": "(典藏|稀有).{0,10}(礼物|用户名|nft).{0,20}@\\w+", "flags": "i", "label": "NFT販售"}, {"pattern": "(猛凿|外围|外圍).{0,15}(女神|小姐|妹子).{0,15}@\\w+", "flags": "i", "label": "色情服務廣告"}, {"pattern": "(D罩杯|E罩杯|巨乳).{0,20}@\\w+", "flags": "i", "label": "色情服務廣告"}, {"pattern": "(转U|轉U).{0,20}(通道|免手续费|TRX).{0,20}@\\w+", "flags": "i", "label": "轉U通道"}, {"pattern": "群主.{0,10}(转U|洗U|搬U).{0,20}@\\w+", "flags": "i", "label": "轉U通道"}, {"pattern": "(手机|电话|设备)\\s*(远程\\s*控制|监控|定位|追踪).{0,20}@\\w+", "flags": "i", "label": "遠程控制廣告"}, {"pattern": "(远程\\s*控制|远控|手机监控).{0,30}(免费测试|合作|私聊|联系)", "flags": "i", "label": "遠程控制廣告"}, {"pattern": "(远控|手机监控|远程监控|定位追踪).{0,20}@\\w+", "flags": "i", "label": "遠程控制廣告"}, {"pattern": "(免费\\s*试用|先.*?测试.*?再).{0,20}@\\w+", "flags": "i", "label": "遠程控制廣告"}, {"pattern": "(批发|批量|一手).{0,10}(静态|动态)?\\s*ip.{0,20}(矩阵|找我|联系|@\\w+)", "flags": "i", "label": "IP批發"}, {"pattern": "(全球|海外).{0,10}(静态|住宅)\\s*ip.{0,20}(批发|供应|出售)", "flags": "i", "label": "IP批發"}, {"pattern": "(一手|批发|批量).{0,10}(ins|fb|facebook|twitter|tiktok|youtube).{0,20}(@\\w+|出售|价格)", "flags": "i", "label": "社群帳號販售"}, {"pattern": "(ins|fb|facebook).{0,15}(老号|账号|批发|一手).{0,15}(@\\w+|出售)", "flags": "i", "label": "社群帳號販售"}, {"pattern": "(飞机号|TG号|telegram号).{0,20}(上线|定制|出售|批发).{0,20}@\\w+", "flags": "i", "label": "帳號販售"}, {"pattern": "(各国|任意国家).{0,15}(飞机|号码).{0,15}(定制|支持|批发)", "flags": "i", "label": "帳號販售"}, {"pattern": "(一手|全球)\\s*老号.{0,20}(白菜价|售后|包)", "flags": "i", "label": "帳號販售"}, {"pattern": "(掉号|留卡|复接).{0,10}(售后|俩个月)", "flags": "i", "label": "帳號販售"}, {"pattern": "(打粉|强拉|群发引流).{0,10}(必备|私信)", "flags": "i", "label": "帳號販售"}, {"pattern": "(无门槛|無門檻).{0,15}(无风险|無風險|兄弟|来做事|來做事|做事)", "flags": "i", "label": "招募話術"}, {"pattern": "(黑产|黑產).{0,10}(日搞|日入|日赚|日賺)", "flags": "i", "label": "招募話術"}, {"pattern": "(日搞|入搞|日入|日赚|日賺).{0,5}[0-9]+\\s*\\.?\\s*[kK千]", "flags": "i", "label": "招募話術"}, {"pattern": "(搞钱|搞錢|捞金|撈金).{0,10}(路子|门路|門路|找我|不收费|不收費|免收费|免收費|免费|免費)", "flags": "i", "label": "招募話術"}, {"pattern": "手机口(?!袋).{0,10}(速来|赚钱|赚大钱|低风险)|手機口(?!袋).{0,10}(速來|賺錢|賺大錢|低風險)", "flags": "i", "label": "招募話術"}, {"pattern": "(看主页|主页了解|主页自取|看主頁|主頁了解|主頁自取).{0,25}(项目|項目|搞钱|搞錢|路子|米|入搞|上车|上車|无门槛|無門檻|无风险|無風險)", "flags": "i", "label": "看主頁引流"}, {"pattern": "(项目|項目|搞钱|搞錢|路子|米|入搞|上车|上車|无门槛|無門檻|无风险|無風險).{0,25}(看主页|主页了解|主页自取|看主頁|主頁了解|主頁自取)", "flags": "i", "label": "看主頁引流"}, {"pattern": "(主页|主頁).{0,8}(有公群|有群|自取|了解|加群)", "flags": "i", "label": "看主頁引流"}, {"pattern": "(无风险|無風險|零风险|零風險).{0,10}(秒结算|秒結算|秒结|秒結|做单|做單)", "flags": "i", "label": "招募話術"}, {"pattern": "(支付宝|支付寶|微信|银行卡|銀行卡).{0,10}(十分钟|十分鐘|半小时|半小時|一小时|一小時).{0,15}(赚|得|拿|入账|入賬|到账|到賬|進賬|进账|🉐)", "flags": "i", "label": "招募話術"}, {"pattern": "(支付宝|支付寶|微信|银行卡|銀行卡).{0,15}(秒结|秒結|一单一结|一單一結)", "flags": "i", "label": "招募話術"}, {"pattern": "(支付宝|支付寶|微信|银行卡|銀行卡).{0,10}(分钟|分鐘).{0,10}(结算|結算|一结|一結)", "flags": "i", "label": "招募話術"}, {"pattern": "一单.{0,10}(秒结|秒結)|一單.{0,10}(秒結|秒结)", "flags": "i", "label": "招募話術"}, {"pattern": "(每天|天天).{0,5}(赚|賺).{0,2}[0-9]{2,6}", "flags": "i", "label": "招募話術"}, {"pattern": "(有|需要).{0,3}(支付宝|支付寶|微信|银行卡|銀行卡).{0,5}就行", "flags": "i", "label": "招募話術"}, {"pattern": "(成品号|成品|成品號).{0,10}(质保|質保|接码|接碼|长效|長效|短效)", "flags": "i", "label": "成品帳號販售"}, {"pattern": "(gmail|Gmail|谷歌邮箱|谷歌郵箱).{0,15}(成品|质保|質保|接码|接碼|批量)", "flags": "i", "label": "成品帳號販售"}, {"pattern": "代.{0,4}刷.{0,5}(礼物|禮物|流量|人气|人氣)", "flags": "i", "label": "代刷服務"}, {"pattern": "(礼物|禮物|流量|人气|人氣).{0,8}代.{0,4}刷", "flags": "i", "label": "代刷服務"}, {"pattern": "(VCC|虚拟信用卡|虛擬信用卡|虚拟卡|虛擬卡).{0,15}(广告投放|廣告投放|广告户|廣告戶)", "flags": "i", "label": "廣告投放卡推廣"}, {"pattern": "(精品|全网|全網|源头|源頭|工厂|工廠).{0,10}(假钞|假鈔|仿制假钞|仿製假鈔|伪钞|偽鈔)", "flags": "i", "label": "假鈔廣告"}, {"pattern": "(假钞|假鈔|仿制假钞|仿製假鈔|伪钞|偽鈔).{0,15}(发财|發財|暴富|日入|变现|變現)", "flags": "i", "label": "假鈔廣告"}, {"pattern": "包养.{0,10}(女大学生|大学生|学生)|包養.{0,10}(女大學生|大學生|學生)", "flags": "i", "label": "包養招募"}, {"pattern": "(#AD|#付费广告|#推广|#频道互推|返佣|会员群|会员频道|AnYun|#AI\\s*短剧|可约可撩|糖心频道|万象拾珍|后端邀约中|欲购从速|尤物色色|商务合作|防失联|印度猛男|广告招租|投稿赚钱|#互推|#支付\\s*AD|广告招商|资金安全|今日养生|色色小站|去衣|验证已过期|全网最嫩|专属豪礼|#TG\\s*搜索|迅驰|优质频道推荐|到期检测)", "flags": "i", "label": "頻道互推/色情關鍵詞"}, {"pattern": "^(?!.*(?:主观评分|节点分析|快速测评|测速带宽|机场介绍))(?=.*?(高速|极速|加速|顶级|稳定|解锁|官方|注册|专线|线路|平台|支持|卡顿|流畅|顺畅|覆盖).*?(?!\\1)(高速|极速|加速|顶级|稳定|解锁|官方|注册|专线|线路|平台|支持|卡顿|流畅|顺畅|覆盖).*?(?!\\1|\\2)(高速|极速|加速|顶级|稳定|解锁|官方|注册|专线|线路|平台|支持|卡顿|流畅|顺畅|覆盖).*?(?!\\1|\\2|\\3)(高速|极速|加速|顶级|稳定|解锁|官方|注册|专线|线路|平台|支持|卡顿|流畅|顺畅|覆盖)).*$", "flags": "is", "label": "機場代理灌水廣告"}, {"pattern": "^(?:(?=.*体育)(?=.*(?:福利|平台|充值|信誉|投注|盘口))|(?=.*(?:交友|担保))(?=.*平台)|(?=.*全网)(?=.*代理)|(?=.*(?:手游|轻松))(?=.*项目)|(?=.*(?:同城|内部|福利))(?=.*资源)|(?=.*(?:广告|咨询|搜索))(?=.*合作)|(?=.*(?:电话|免费))(?=.*流量)|(?=.*(?:财务|提现))(?=.*钱包)|(?=.*发货)(?=.*链接)|(?=.*仅限)(?=.*活动)|(?=.*乐趣)(?=.*交流)|(?=.*成熟)(?=.*口嗨)|(?=.*欧美)(?=.*日韩)|(?=.*去衣)(?=.*换脸)|(?=.*(?:走私|货源))(?=.*香烟)|(?=.*户籍)(?=.*查询)|(?=.*印度)(?=.*药物)|(?=.*金融)(?=.*服务)|(?=.*极搜)(?=.*(?:引擎|搜索))|(?=.*秒出)(?=.*证书)(?=.*(?:售后|质保))|(?=.*大头)(?=.*(?:社工|查询))).*$", "flags": "is", "label": "多類目組合廣告"}], "confuse": [["Vx", "微信"], ["vx", "微信"], ["VX", "微信"], ["wx", "微信"], ["WX", "微信"], ["ZFB", "支付宝"], ["zfb", "支付宝"], ["Zfb", "支付宝"], ["shou mi", "收米"], ["shoumi", "收米"], ["减介", "简介"], ["简届", "简介"], ["兼届", "简介"], ["简戒", "简介"], ["简洁", "简介"], ["简戎", "简介"], ["jian jie", "简介"], ["硷介", "简介"], ["筒介", "简介"], ["１", "1"], ["２", "2"], ["３", "3"], ["４", "4"], ["５", "5"], ["６", "6"], ["７", "7"], ["８", "8"], ["９", "9"], ["０", "0"], ["万＋", "万+"], ["看主叶", "看主页"], ["主叶", "主页"], ["風憸", "风险"], ["风憸", "风险"], ["公裙", "公群"], ["项牧", "项目"], ["項牧", "項目"], ["砍主页", "看主页"], ["砍主頁", "看主頁"], ["ZF宝", "支付宝"], ["ZF寶", "支付寶"], ["zf宝", "支付宝"], ["吱付宝", "支付宝"], ["吱付寶", "支付寶"], ["梅天", "每天"]], "zeroWidth": ["​", "‏", "⁣", "‍", "‎", "﻿", "͏", "‌", "⁠", "⁡", "⁢", "­", "⁤"], "ruleCount": 136, "templateCount": 269};
+
+function cleanText(text){
+  let t = Array.from(text).filter(ch => !DATA.zeroWidth.includes(ch)).join('');
+  t = t.replace(/\p{Cf}/gu, '');
+  t = t.normalize('NFKC');
+  t = t.replace(/(?<=[\u4e00-\u9fff])[+·•/\\\-.。，,\s]+(?=[\u4e00-\u9fff])/gu, '');
+  for (const [k, v] of DATA.confuse) t = t.split(k).join(v);
+  t = t.replace(/[0-9oO]{2,}/g, m => /[0-9]/.test(m) ? m.replace(/[oO]/g, '0') : m);
+  return t.trim();
+}
+
+function checkRules(text){
+  for (const r of DATA.rules){
+    const re = new RegExp(r.pattern, r.flags);
+    const m = re.exec(text);
+    if (m) return {label:r.label, match:m[0]};
+  }
+  return null;
+}
+
+function escapeHtml(s){
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function markObfuscated(raw, cleaned){
+  // 粗略標出跟乾淨版不同、疑似混淆用的符號字元
+  const obfChars = /[+·•/\\.。，,\u200b\u200c\u200d\ufeff]/;
+  let out = '';
+  for (const ch of raw){
+    if (obfChars.test(ch)) out += `<span class="obf-mark">${escapeHtml(ch === '\u200b' || ch === '\u200c' || ch === '\u200d' || ch === '\ufeff' ? '·' : ch)}</span>`;
+    else out += escapeHtml(ch);
+  }
+  return out;
+}
+
+function highlightTrigger(cleaned, matchText){
+  if (!matchText) return escapeHtml(cleaned);
+  const idx = cleaned.indexOf(matchText);
+  if (idx === -1) return escapeHtml(cleaned);
+  return escapeHtml(cleaned.slice(0, idx))
+    + '<span class="trigger">' + escapeHtml(matchText) + '</span>'
+    + escapeHtml(cleaned.slice(idx + matchText.length));
+}
+
+function runScan(){
+  const raw = document.getElementById('input').value;
+  const stagesEl = document.getElementById('stages');
+  if (!raw.trim()){ stagesEl.classList.remove('show'); return; }
+
+  const cleaned = cleanText(raw);
+  const hit = checkRules(cleaned);
+
+  let html = '';
+  html += `<div class="stage"><div class="stage-label">01 · 原始輸入（標色為可疑混淆符號）</div><div class="stage-body">${markObfuscated(raw)}</div></div>`;
+  html += `<div class="stage"><div class="stage-label">02 · 沖洗後（去零寬字元／NFKC／拆字還原／同音替換）</div><div class="stage-body developed">${escapeHtml(cleaned)}</div></div>`;
+
+  if (hit){
+    html += `<div class="stage"><div class="stage-label">03 · 命中規則</div><div class="stage-body developed">${highlightTrigger(cleaned, hit.match)}</div>
+      <div class="verdict hit"><span class="verdict-tag">🚨 判定為廣告</span><span>命中規則：${escapeHtml(hit.label)}</span><span class="verdict-label">L1 規則引擎</span></div></div>`;
+  } else {
+    html += `<div class="stage"><div class="verdict clean"><span class="verdict-tag">✅ 未命中 L1 規則</span><span>可能仍會被 L2 語義相似度攔下（此頁面未搬運）</span></div></div>`;
+  }
+
+  stagesEl.innerHTML = html;
+  stagesEl.classList.add('show');
+}
+
+document.getElementById('scan').addEventListener('click', runScan);
+document.getElementById('input').addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') runScan();
+});
+
+const examples = [
+  "2026最.牛.最.稳.项/牧✅砍/主/叶",
+  "有吱付.宝速来 一单40O 秒结",
+  "私聊请发@my_message_00_bot",
+  "我今天心情不錯，晚上想吃火鍋",
+  "梅天 賺8o0o @jyaay",
+  "包-养.女-大/学-生 ｛点-頭-像｝",
+];
+const chipsEl = document.getElementById('chips');
+examples.forEach(ex => {
+  const c = document.createElement('div');
+  c.className = 'chip';
+  c.textContent = ex.length > 16 ? ex.slice(0,16) + '…' : ex;
+  c.title = ex;
+  c.addEventListener('click', () => { document.getElementById('input').value = ex; runScan(); });
+  chipsEl.appendChild(c);
+});
+
+const statsEl = document.getElementById('stats');
+statsEl.innerHTML = `
+  <div class="stat"><div class="num">${DATA.ruleCount}+</div><div class="cap">L1 正則規則</div></div>
+  <div class="stat"><div class="num">${DATA.templateCount}+</div><div class="cap">廣告範本（正式版 L2 使用）</div></div>
+  <div class="stat"><div class="num">11</div><div class="cap">偵測分類</div></div>
+`;
+document.getElementById('footStats').textContent = `${DATA.ruleCount} rules · ${DATA.templateCount} templates · client-side demo`;
+
+const techniques = [
+  {t:"拆字符號", ex:["看/主/叶", "看主页"]},
+  {t:"零寬字元", ex:["信‌用卡", "信用卡"]},
+  {t:"同音／形近字", ex:["砍主頁 / 憸", "看主頁 / 險"]},
+  {t:"o/O 混淆數字", ex:["8o0o", "8000"]},
+  {t:"全形符號", ex:["１０分鐘", "10分鐘"]},
+  {t:"間隔句號", ex:["最.牛.最.稳", "最牛最稳"]},
+];
+const techGrid = document.getElementById('techGrid');
+techniques.forEach(tech => {
+  const card = document.createElement('div');
+  card.className = 'tech-card';
+  card.innerHTML = `<h3>${tech.t}</h3><div class="ex"><span>${escapeHtml(tech.ex[0])}</span><span class="arrow">→</span><span class="after">${escapeHtml(tech.ex[1])}</span></div>`;
+  techGrid.appendChild(card);
+});
+
+runScan();
+</script>
+</body>
+</html>
