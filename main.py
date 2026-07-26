@@ -471,30 +471,25 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         permissions=create_simple_mute_permissions(),
                     )
 
-                    captcha_img, answer = generate_math_captcha()
-                    options = _generate_captcha_options(answer)
-
-                    # 記錄待驗證信息
+                    # 記錄待驗證信息（此時還沒出題，題目留到按下開始驗證才產生）
                     pending_verifications[user.id] = {
                         "chat_id": chat.id,
                         "user_name": user.mention_html(),
                         "reasons": reasons,
                         "timestamp": time.time(),
                         "needs_welcome": True,  # 標記需要歡迎
-                        "captcha_answer": answer,
+                        "captcha_answer": None,
                         "attempts": 0,
                     }
 
                     keyboard = [[
-                        InlineKeyboardButton(str(opt), callback_data=f"captcha_{user.id}_{opt}")
-                        for opt in options
+                        InlineKeyboardButton("🔍 開始真人驗證", callback_data=f"captchastart_{user.id}")
                     ]]
 
-                    await context.bot.send_photo(
+                    await context.bot.send_message(
                         chat.id,
-                        photo=captcha_img,
-                        caption=f"⚠️ {user.mention_html()} 需要人機驗證（{', '.join(reasons)}）\n"
-                                f"請點選圖片中算式的正確答案（{VERIFY_ATTEMPT_LIMIT} 次機會，30 分鐘內有效）",
+                        f"⚠️ {user.mention_html()} 需要人機驗證（{', '.join(reasons)}）\n"
+                        f"請點下方按鈕開始驗證（{VERIFY_ATTEMPT_LIMIT} 次機會，30 分鐘內有效）",
                         reply_markup=InlineKeyboardMarkup(keyboard),
                         parse_mode="HTML"
                     )
@@ -594,6 +589,56 @@ def _generate_captcha_options(answer: int, count: int = 4) -> list:
     return options
 
 
+async def on_captcha_start_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """處理「🔍 開始真人驗證」按鈕（captchastart_{user_id}）：點下去才產生題目與選項，
+    擋掉單純隨機亂點一次就走的機器人。"""
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    await query.answer()
+
+    try:
+        user_id = int(query.data.split("_")[1])
+    except (IndexError, ValueError):
+        return
+
+    if user_id not in pending_verifications:
+        await query.answer("驗證已過期或無效", show_alert=True)
+        return
+
+    verify_info = pending_verifications[user_id]
+
+    if query.from_user.id != user_id:
+        await query.answer("這不是你的驗證！", show_alert=True)
+        return
+
+    if time.time() - verify_info["timestamp"] > 1800:
+        await query.edit_message_text("❌ 驗證已過期（超過30分鐘）", reply_markup=None)
+        del pending_verifications[user_id]
+        return
+
+    captcha_img, answer = generate_math_captcha()
+    options = _generate_captcha_options(answer)
+    verify_info["captcha_answer"] = answer
+
+    keyboard = [[
+        InlineKeyboardButton(str(opt), callback_data=f"captcha_{user_id}_{opt}")
+        for opt in options
+    ]]
+
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+    await context.bot.send_photo(
+        verify_info["chat_id"],
+        photo=captcha_img,
+        caption=f"請點選圖片中算式的正確答案（剩餘 {VERIFY_ATTEMPT_LIMIT - verify_info['attempts']} 次機會）",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
 async def on_captcha_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """處理圖片算術驗證碼的選項按鈕（captcha_{user_id}_{選項}）。"""
     query = update.callback_query
@@ -615,6 +660,10 @@ async def on_captcha_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         verify_info = pending_verifications[user_id]
         chat_id = verify_info["chat_id"]
+
+        if verify_info.get("captcha_answer") is None:
+            await query.answer("請先點「開始真人驗證」", show_alert=True)
+            return
 
         if query.from_user.id != user_id:
             await query.answer("這不是你的驗證！", show_alert=True)
@@ -2610,6 +2659,7 @@ def main():
     application.add_handler(CallbackQueryHandler(on_proposal_setup,  pattern=r"^propsetup_"))
     application.add_handler(CallbackQueryHandler(on_proposal_vote,   pattern=r"^prop_"))
     application.add_handler(CallbackQueryHandler(on_referendum_vote, pattern=r"^ref_"))
+    application.add_handler(CallbackQueryHandler(on_captcha_start_click, pattern=r"^captchastart_"))
     application.add_handler(CallbackQueryHandler(on_captcha_click, pattern=r"^captcha_"))
     application.add_handler(CallbackQueryHandler(on_guard_kick_click, pattern=r"^guard(kick|sel|exec)_"))
     application.add_handler(CallbackQueryHandler(on_verify_click))
