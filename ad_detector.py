@@ -135,8 +135,8 @@ _RULES = [
     (r"同城\s*配送", "上門服務"),
     (r"24[Hh小时]\s*(便民|服务|待命)", "上門服務"),
     # TG 代發
-    (r"(飞机|TG|tg).{0,8}(全行业|群发|代发|推广)", "TG代發"),
-    (r"(广告|ad).{0,8}代\s*(发|投)", "TG代發"),
+    (r"(飞机|TG|tg|飛機).{0,8}(全行业|群发|代发|全行業|群發|代發|推广|推廣)", "TG代發"),
+    (r"(广告|ad|廣告).{0,8}代\s*(发|投|發)", "TG代發"),
     (r"精准\s*引流", "TG代發"),
     (r"覆盖\s*(?:[0-9]+|上万|几万|数万|成千上万|数千|上千)\s*(万|千|百|个)?\s*(粉|群)", "TG代發"),
     # 軟色情
@@ -153,11 +153,13 @@ _RULES = [
     (r"(GPT|ChatGPT|OpenAI).{0,20}(拒付|拒絕|扣费不稳|扣費不穩)", "GPT訂閱推廣"),
     (r"(GPT|ChatGPT|OpenAI).{0,20}(订阅|訂閱).{0,20}(优惠|優惠|代充|包月|包年|稳定|穩定|防拒付|免拒付|量大|批发|批發|扣费|扣費)", "GPT訂閱推廣"),
     (r"(VCC|虚拟信用卡|虛擬信用卡).{0,30}(GPT|ChatGPT|OpenAI|Claude|免开卡费|免開卡費|量大)", "VCC金融卡推廣"),
+    (r"(VCC|虚拟卡|虛擬卡).{0,10}(卡台|卡臺).{0,15}(负责人|負責人|政策|认准|認準)", "VCC金融卡推廣"),
     (r"(GPT|ChatGPT|OpenAI).{0,30}(VCC|虚拟信用卡|虛擬信用卡|免开卡费|免開卡費)", "GPT金融卡推廣"),
     (r"[Cc]laude.{0,20}(专用卡|專用卡|扣款|丝滑|絲滑|绑定|綁定|VCC)", "Claude金融卡推廣"),
     (r"(专用卡|專用卡).{0,15}(FB|TK|GG|[Ff]acebook|[Tt]ik[Tt]ok|谷歌|希音|亚马逊|亞馬遜|速卖通|速賣通|广告户|廣告戶)", "廣告投放卡推廣"),
 
     (r"(洗\s*[Uu✓]|洗\s*钱|洗\s*米).{0,20}(赚|空缺|团队|一天|日入|来|來)", "洗U灰產"),
+    (r"洗米.{0,15}[0-9]+.{0,10}@\w{3,}", "洗U灰產"),
     (r"USDT\s*(搬砖|项目|转账).{0,20}(空缺|勤快|小白)", "洗U灰產"),
     (r"(轻\s*灰\s*产|灰\s*产|轻\s*灰|輕\s*灰).{0,10}(跑通|项目|來|来|绿色|綠色|改变现状|改變現狀)", "洗U灰產"),
     (r"(免手续费|免手續費|免费转|免費轉|[0-9.]+\s*TRX).{0,10}(转\s*[Uu]|[Uu]\s*到账|[Uu]\s*到賬)", "洗U灰產"),
@@ -382,17 +384,48 @@ WHITELIST_RESCUE_MARGIN = 0.0
 # 品牌名稱本身不是廣告；OpenAI/GPT 只有在出現訂閱、VCC、扣費等
 # 推廣語境時才允許 L2 模板相似度判定，避免「openai我肏你媽」這類
 # 普通聊天因共享字元 n-gram 被誤封。
-_BRAND_NAMES = re.compile(r"(?:openai|chatgpt|gpt|claude|grok)", re.IGNORECASE)
-_BRAND_AD_CONTEXT = re.compile(
-    r"(?:訂閱|订阅|續費|续费|拒付|拒絕|扣費|扣费|開卡|开卡|免卡|量大|"
-    r"虛擬信用卡|虚拟信用卡|虛擬卡|虚拟卡|vcc|信用卡|批發|批发|出售|接單|接单|"
-    r"解鎖|解锁|充值|代充|卡商|大卡量|subscription|renew|billing|card)",
-    re.IGNORECASE,
-)
+# 每一組（品牌詞正則, 語境正則）獨立檢查：文字裡沒有該組品牌詞就跳過這組；
+# 有的話，必須同時命中對應語境才放行判定為廣告，否則視為只是提到品牌詞的正常聊天。
+_BRAND_GUARDS = [
+    (
+        re.compile(r"(?:openai|chatgpt|gpt|claude|grok)", re.IGNORECASE),
+        re.compile(
+            r"(?:訂閱|订阅|續費|续费|拒付|拒絕|扣費|扣费|開卡|开卡|免卡|量大|"
+            r"虛擬信用卡|虚拟信用卡|虛擬卡|虚拟卡|vcc|信用卡|批發|批发|出售|接單|接单|"
+            r"解鎖|解锁|充值|代充|卡商|大卡量|subscription|renew|billing|card)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        # Telegram/TG 品牌詞本身在這個 bot 的使用情境下極度常見（就是個 TG bot），
+        # 沒有推廣語境時不該被 L2 相似度判為廣告。
+        re.compile(r"telegram", re.IGNORECASE),
+        re.compile(
+            r"(?:老号|老號|资源丰富|資源豐富|代发|代發|推广|推廣|群发|群發|引流|"
+            r"接单|接單|批发|批發|出售|卡商|全行业|全行業|频道|頻道|覆盖|覆蓋|"
+            r"精准|精準|价格实惠|價格實惠|渠道)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        # 微信／支付寶是极常見的日常付款方式詞，沒有代收/跑分類語境不該單靠相似度判廣告。
+        re.compile(r"(?:微信|支付宝|支付寶|wechat|alipay)", re.IGNORECASE),
+        re.compile(
+            r"(?:代收|代付|收款|收米|走账|走賬|流水|日入|佣金|兼职|兼職|接单|接單|"
+            r"洗钱|洗錢|洗米|洗u|洗U|跑分|长期合作|長期合作|稳定要人|穩定要人|"
+            r"代付款|收付款|结算|結算|一单|一單)",
+            re.IGNORECASE,
+        ),
+    ),
+]
+
 
 def _has_brand_ad_context(text: str) -> bool:
-    """品牌詞需搭配明確推廣語境，才可由 L2 判為廣告。"""
-    return not _BRAND_NAMES.search(text) or bool(_BRAND_AD_CONTEXT.search(text))
+    """品牌／付款方式詞需搭配明確推廣語境，才可由 L2 判為廣告。"""
+    for brand_re, context_re in _BRAND_GUARDS:
+        if brand_re.search(text) and not context_re.search(text):
+            return False
+    return True
 
 def _build_vectorizers():
     # 基礎大庫 + 動態入庫的廣告樣本

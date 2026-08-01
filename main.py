@@ -11,7 +11,7 @@ import logging
 import uuid
 import random
 from PIL import Image, ImageDraw, ImageFont
-from ad_detector import detect_ad
+from ad_detector import detect_ad, clean_text
 from settings import (
     DEFAULT_FEATURES,
     FEATURE_LABELS,
@@ -69,6 +69,11 @@ consumed_sample_messages = set()  # (chat_id, message_id)，避免樣本輸入�
 pending_false_positive_samples: Dict[str, dict] = {}  # token -> {"text","chat_id","user_id"}
 active_tests: set = set()  # (chat_id, user_id)，/test 後持續測試直到 /stop
 pending_guard_kick: Dict[int, dict] = {}  # chat_id -> {"users": {user_id: name}, "selected": set(user_id,...)}
+recent_message_texts: Dict[Tuple[int, str], list] = {}  # (chat_id, 正規化文字) -> [timestamp,...]
+REPEAT_WINDOW_SECONDS = 600  # 重複洗版偵測時間窗（10分鐘）
+REPEAT_THRESHOLD = 3         # 同樣內容在時間窗內出現幾次視為洗版
+REPEAT_MIN_LENGTH = 8        # 太短的訊息（哈哈/在/666）不列入重複偵測，避免誤傷
+pending_sample_list: Dict[int, dict] = {}  # admin_user_id -> {"items": [...], "whitelist": bool}，供 /samples 刪除用
 
 # ================== 權限設定 ==================
 def create_simple_mute_permissions():
@@ -1553,6 +1558,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/propose <內容> - 發起提案\n"
         "/addsample - 加入廣告樣本\n"
         "/whitelist - 加入非廣告樣本\n"
+        "/samples [wl] - 檢視並刪除動態樣本庫內容（wl 看白樣本庫）\n"
         "/exportsamples - 匯出樣本庫\n"
         "/cleanupads - 整理並去除廣告樣本重複項\n"
         "/test - 開始逐則測試（/stop 結束）\n"
@@ -2088,6 +2094,94 @@ async def cleanup_ads_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 
+def _build_sample_list_keyboard(items: list, prefix: str) -> InlineKeyboardMarkup:
+    rows = []
+    for i, s in enumerate(items):
+        preview = s if len(s) <= 40 else s[:40] + "…"
+        rows.append([InlineKeyboardButton(f"🗑 {i + 1}. {preview}", callback_data=f"{prefix}_{i}")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def samples_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/samples：列出動態廣告樣本庫（或 /samples wl 列出白樣本庫），點按鈕可直接刪除。"""
+    user = update.effective_user
+    message = update.effective_message
+    if user.id != OWNER_ID:
+        await message.reply_text("❌ 僅管理員可用此指令！")
+        return
+
+    from ad_samples import load_ad_samples, load_whitelist_samples
+
+    args = context.args if context.args else []
+    is_whitelist = len(args) > 0 and args[0].lower() in ("wl", "whitelist", "白名单", "白樣本")
+
+    items = load_whitelist_samples() if is_whitelist else load_ad_samples()
+    label = "白樣本庫（非廣告）" if is_whitelist else "動態廣告樣本庫"
+
+    if not items:
+        await message.reply_text(f"目前{label}是空的。")
+        return
+
+    if len(items) > 30:
+        await message.reply_text(f"⚠️ {label}共 {len(items)} 條，只顯示前 30 條，其餘請用 /exportsamples 匯出查看。")
+        items = items[:30]
+
+    pending_sample_list[user.id] = {"items": items, "whitelist": is_whitelist}
+    prefix = "delwl" if is_whitelist else "delsample"
+    await message.reply_text(
+        f"📋 {label}共 {len(items)} 條，點按鈕可刪除：",
+        reply_markup=_build_sample_list_keyboard(items, prefix),
+    )
+
+
+async def on_sample_delete_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """處理 /samples 清單裡的刪除按鈕（delsample_{index} / delwl_{index}）。"""
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    await query.answer()
+
+    if query.from_user.id != OWNER_ID:
+        await query.answer("僅限管理員操作", show_alert=True)
+        return
+
+    is_whitelist = query.data.startswith("delwl_")
+    try:
+        idx = int(query.data.split("_", 1)[1])
+    except (IndexError, ValueError):
+        return
+
+    state = pending_sample_list.get(query.from_user.id)
+    if not state or state.get("whitelist") != is_whitelist or idx >= len(state["items"]):
+        await query.edit_message_text("❌ 這份列表已過期，請重新 /samples", reply_markup=None)
+        return
+
+    target_text = state["items"][idx]
+
+    from ad_samples import remove_ad_sample, remove_whitelist_sample
+    removed = remove_whitelist_sample(target_text) if is_whitelist else remove_ad_sample(target_text)
+
+    if not removed:
+        await query.edit_message_text("⚠️ 刪除失敗（可能已被移除）。", reply_markup=None)
+        return
+
+    try:
+        _reload_detector()
+    except Exception as e:
+        logger.error(f"刪除樣本後熱重載失敗: {e}")
+
+    state["items"].pop(idx)
+    label = "白樣本庫" if is_whitelist else "動態廣告樣本庫"
+    if state["items"]:
+        prefix = "delwl" if is_whitelist else "delsample"
+        await query.edit_message_text(
+            f"✅ 已刪除，{label}剩餘 {len(state['items'])} 條：",
+            reply_markup=_build_sample_list_keyboard(state["items"], prefix),
+        )
+    else:
+        await query.edit_message_text(f"✅ 已刪除，{label}現在是空的。", reply_markup=None)
+
+
 async def addsample_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/addsample：入庫，把回覆的訊息或指令後文字加入廣告樣本庫"""
     user = update.effective_user
@@ -2434,6 +2528,32 @@ async def get_all_admins(bot, chat_id: int) -> list:
         logger.error(f"取得管理員列表失敗: {e}")
         return []
 
+def _check_repeat_flood(chat_id: int, text: str) -> bool:
+    """偵測同一群組內短時間反覆出現同樣（正規化後）內容的洗版行為，
+    抓那些內容本身不好判斷、但一直重複發送的廣告。"""
+    normalized = clean_text(text)
+    if len(normalized) < REPEAT_MIN_LENGTH:
+        return False
+
+    now = time.time()
+    key = (chat_id, normalized)
+    timestamps = [t for t in recent_message_texts.get(key, []) if now - t < REPEAT_WINDOW_SECONDS]
+    timestamps.append(now)
+    recent_message_texts[key] = timestamps
+
+    # 低機率順手清掉整體過期資料，避免字典無限增長
+    if random.random() < 0.01:
+        cutoff = now - REPEAT_WINDOW_SECONDS
+        for k in list(recent_message_texts.keys()):
+            pruned = [t for t in recent_message_texts[k] if t > cutoff]
+            if pruned:
+                recent_message_texts[k] = pruned
+            else:
+                del recent_message_texts[k]
+
+    return len(timestamps) >= REPEAT_THRESHOLD
+
+
 async def handle_message_ad_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """偵測訊息是否為廣告，是則禁言並通知管理員"""
     message = update.effective_message
@@ -2460,7 +2580,12 @@ async def handle_message_ad_check(update: Update, context: ContextTypes.DEFAULT_
 
     is_ad, confidence, reason = detect_ad(message.text)
     if not is_ad:
-        return
+        if _check_repeat_flood(chat.id, message.text):
+            is_ad = True
+            confidence = 0.0
+            reason = "重複洗版嫌疑（短時間內同樣內容重複出現）"
+        else:
+            return
 
     logger.info(f"廣告偵測: 用戶 {user.id} 在 {chat.id} | {reason} | 信心:{confidence:.2f}")
 
@@ -2627,6 +2752,7 @@ def main():
     application.add_handler(CommandHandler("ban", ban_command))
     application.add_handler(CommandHandler("update", update_command))
     application.add_handler(CommandHandler("updatead", updatead_command))
+    application.add_handler(CommandHandler("samples", samples_command))
     application.add_handler(CommandHandler("addsample", addsample_command))
     application.add_handler(CommandHandler("whitelist", whitelist_command))
     application.add_handler(CommandHandler("exportsamples", exportsamples_command))
@@ -2662,6 +2788,7 @@ def main():
     application.add_handler(CallbackQueryHandler(on_captcha_start_click, pattern=r"^captchastart_"))
     application.add_handler(CallbackQueryHandler(on_captcha_click, pattern=r"^captcha_"))
     application.add_handler(CallbackQueryHandler(on_guard_kick_click, pattern=r"^guard(kick|sel|exec)_"))
+    application.add_handler(CallbackQueryHandler(on_sample_delete_click, pattern=r"^del(sample|wl)_"))
     application.add_handler(CallbackQueryHandler(on_verify_click))
     
     application.add_handler(ChatMemberHandler(
