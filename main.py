@@ -291,6 +291,22 @@ async def _delete_after(message, seconds: int):
         pass
 
 
+async def _expire_verification(bot, user_id: int, delay: float = 1800):
+    """驗證逾時（預設30分鐘）後，若還沒完成就自動清掉當下那則訊息與狀態，
+    避免「開始真人驗證」按鈕或題目一直卡在群裡沒人管。"""
+    await asyncio.sleep(delay)
+    info = pending_verifications.get(user_id)
+    if not info:
+        return
+    del pending_verifications[user_id]
+    msg_ref = info.get("message_ref")
+    if msg_ref:
+        try:
+            await bot.delete_message(chat_id=msg_ref["chat_id"], message_id=msg_ref["message_id"])
+        except Exception:
+            pass
+
+
 # ================== 處理機器人加入群組 ==================
 async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """處理機器人自己被加入/移除群組"""
@@ -485,19 +501,25 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         "needs_welcome": True,  # 標記需要歡迎
                         "captcha_answer": None,
                         "attempts": 0,
+                        "message_ref": None,
                     }
 
                     keyboard = [[
                         InlineKeyboardButton("🔍 開始真人驗證", callback_data=f"captchastart_{user.id}")
                     ]]
 
-                    await context.bot.send_message(
+                    sent = await context.bot.send_message(
                         chat.id,
                         f"⚠️ {user.mention_html()} 需要人機驗證（{', '.join(reasons)}）\n"
                         f"請點下方按鈕開始驗證（{VERIFY_ATTEMPT_LIMIT} 次機會，30 分鐘內有效）",
                         reply_markup=InlineKeyboardMarkup(keyboard),
                         parse_mode="HTML"
                     )
+                    pending_verifications[user.id]["message_ref"] = {
+                        "chat_id": sent.chat_id,
+                        "message_id": sent.message_id,
+                    }
+                    asyncio.create_task(_expire_verification(context.bot, user.id, 1800))
 
                 except Exception as e:
                     logger.error(f"禁言失敗: {e}")
@@ -619,6 +641,7 @@ async def on_captcha_start_click(update: Update, context: ContextTypes.DEFAULT_T
 
     if time.time() - verify_info["timestamp"] > 1800:
         await query.edit_message_text("❌ 驗證已過期（超過30分鐘）", reply_markup=None)
+        asyncio.create_task(_delete_after(query.message, 5))
         del pending_verifications[user_id]
         return
 
@@ -636,12 +659,14 @@ async def on_captcha_start_click(update: Update, context: ContextTypes.DEFAULT_T
     except Exception:
         pass
 
-    await context.bot.send_photo(
+    sent = await context.bot.send_photo(
         verify_info["chat_id"],
         photo=captcha_img,
-        caption=f"請點選圖片中算式的正確答案（剩餘 {VERIFY_ATTEMPT_LIMIT - verify_info['attempts']} 次機會）",
+        caption=f"{verify_info['user_name']} 請點選圖片中算式的正確答案（剩餘 {VERIFY_ATTEMPT_LIMIT - verify_info['attempts']} 次機會）",
         reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML",
     )
+    verify_info["message_ref"] = {"chat_id": sent.chat_id, "message_id": sent.message_id}
 
 
 async def on_captcha_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -705,12 +730,14 @@ async def on_captcha_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.delete()
             except Exception:
                 pass
-            await context.bot.send_photo(
+            sent = await context.bot.send_photo(
                 chat_id,
                 photo=captcha_img,
-                caption=f"❌ 答錯了，請見新題目（剩餘 {remaining} 次機會）",
+                caption=f"{verify_info['user_name']} ❌ 答錯了，請見新題目（剩餘 {remaining} 次機會）",
                 reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="HTML",
             )
+            verify_info["message_ref"] = {"chat_id": sent.chat_id, "message_id": sent.message_id}
             return
 
         # 答對，解除禁言
