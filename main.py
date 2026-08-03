@@ -381,6 +381,11 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if old_status in ["left", "kicked"] and new_status == "member":
             logger.info(f"👤 新成員: {user.full_name} (ID: {user.id}) 加入 {chat.title}")
 
+            # 防止 Telegram 對同一次入群重複送出 chat_member 事件，導致驗證流程被跑兩次
+            if user.id in pending_verifications:
+                logger.info(f"⏭ 用戶 {user.id} 已有進行中的驗證流程，忽略重複事件")
+                return
+
             # 🛡 防護模式：完全靜默，不發任何提示，直接關閉所有權限並記錄名單，關閉時再統一處理
             if known_groups.get(chat.id, {}).get("guard_mode", False):
                 try:
