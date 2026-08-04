@@ -2586,13 +2586,36 @@ def _check_repeat_flood(chat_id: int, text: str) -> bool:
     return len(timestamps) >= REPEAT_THRESHOLD
 
 
+def _extract_check_text(message) -> str:
+    """從訊息取出要拿去做廣告偵測的文字：一般文字、圖片/影片/檔案的說明文字；
+    沒有文字時（純圖片、聯絡人卡片），組一個合成字串讓重複洗版偵測還能運作，
+    即使規則庫/相似度本身看不懂圖片內容。"""
+    if message.text:
+        return message.text
+    if message.caption:
+        return message.caption
+    if message.contact:
+        c = message.contact
+        return f"[联系人分享]{c.first_name or ''}{c.last_name or ''}{c.phone_number or ''}"
+    if message.photo:
+        return f"[图片:{message.photo[-1].file_unique_id}]"
+    if message.video:
+        return f"[视频:{message.video.file_unique_id}]"
+    if message.document:
+        return f"[文件:{message.document.file_unique_id}]"
+    return ""
+
+
 async def handle_message_ad_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """偵測訊息是否為廣告，是則禁言並通知管理員"""
     message = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
 
-    if not message or not user or not message.text:
+    if not message or not user or not chat:
+        return
+    text = _extract_check_text(message)
+    if not text:
         return
     if chat.type == "private":
         return
@@ -2610,9 +2633,9 @@ async def handle_message_ad_check(update: Update, context: ContextTypes.DEFAULT_
     except Exception:
         pass
 
-    is_ad, confidence, reason = detect_ad(message.text)
+    is_ad, confidence, reason = detect_ad(text)
     if not is_ad:
-        if _check_repeat_flood(chat.id, message.text):
+        if _check_repeat_flood(chat.id, text):
             is_ad = True
             confidence = 0.0
             reason = "重複洗版嫌疑（短時間內同樣內容重複出現）"
@@ -2650,7 +2673,7 @@ async def handle_message_ad_check(update: Update, context: ContextTypes.DEFAULT_
 
     token = uuid.uuid4().hex
     pending_false_positive_samples[token] = {
-        "text": message.text,
+        "text": text,
         "chat_id": chat.id,
         "user_id": user.id,
     }
@@ -2813,6 +2836,13 @@ def main():
     ), group=0)
 
     # 廣告偵測已由統一文字入口處理，避免樣本輸入被第二個 handler 漏掉或重複處理。
+
+    # 圖片/影片/檔案（含說明文字）、聯絡人卡片：走同一套廣告偵測，
+    # 沒有文字內容的純圖片/聯絡人則退回重複洗版偵測（見 _extract_check_text）。
+    application.add_handler(MessageHandler(
+        (filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.CONTACT) & ~filters.COMMAND,
+        handle_message_ad_check,
+    ), group=0)
 
     application.add_handler(CallbackQueryHandler(on_proposal_setup,  pattern=r"^propsetup_"))
     application.add_handler(CallbackQueryHandler(on_proposal_vote,   pattern=r"^prop_"))
