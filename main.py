@@ -11,7 +11,7 @@ import logging
 import uuid
 import random
 from PIL import Image, ImageDraw, ImageFont
-from ad_detector import detect_ad, clean_text
+from ad_detector import detect_ad, clean_text, check_neutral_phrase
 from settings import (
     DEFAULT_FEATURES,
     FEATURE_LABELS,
@@ -401,7 +401,10 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     "name": user.full_name or str(user.id),
                 })
                 save_known_groups()
-                logger.info(f"🛡 防護模式：新成員 {user.id} 已靜默禁言並記錄（{chat.id}）")
+                logger.info(
+                    f"🛡 防護模式：新成員 {user.id} 已靜默禁言並記錄（{chat.id}），"
+                    f"目前名單共 {len(known_groups[chat.id]['guard_joined'])} 人"
+                )
                 return
 
             # 檢查用戶簡介
@@ -1787,7 +1790,10 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     known_groups[chat.id]["guard_mode"] = False
     joined = known_groups[chat.id].get("guard_joined", [])
     known_groups[chat.id]["guard_joined"] = []
-    logger.warning(f"🛡 防護模式已由 {user.id} 於群組 {chat.id} 解除，期間共 {len(joined)} 人加入")
+    logger.warning(
+        f"🛡 防護模式已由 {user.id} 於群組 {chat.id} 解除，"
+        f"讀到的名單: {joined}"
+    )
     save_known_groups()
 
     await message.reply_text(f"🛑 已停止測試模式。\n🛡 防護模式已解除（期間共 {len(joined)} 人加入）。")
@@ -1814,17 +1820,24 @@ async def test_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
-    if not message or not message.text or not chat or not user:
+    if not message or not chat or not user:
         return
     if (chat.id, user.id) not in active_tests:
         return
-    is_ad, confidence, reason = detect_ad(message.text)
+    text = _extract_check_text(message)
+    if not text:
+        return
+    is_ad, confidence, reason = detect_ad(text)
     result = "✅ 會刪除並禁言" if is_ad else "✅ 不會刪除，會放行"
+    note = ""
+    if not (message.text or message.caption):
+        note = "\n\n⚠️ 沒有文字/說明內容可分析，規則庫只能看合成的識別字串（檔案ID/聯絡人資訊），看不懂圖片實際內容；正式環境會另外靠「重複洗版偵測」抓同樣檔案重複發送的情況。"
     await message.reply_text(
         f"🧪 測試結果：{result}\n"
         f"判定：{'廣告' if is_ad else '正常訊息'}\n"
         f"信心：{confidence:.0%}\n"
-        f"原因：{reason}\n\n"
+        f"原因：{reason}"
+        f"{note}\n\n"
         f"（測試模式不會真的刪除或禁言）"
     )
 
@@ -2606,6 +2619,48 @@ def _extract_check_text(message) -> str:
     return ""
 
 
+async def handle_media_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """統一媒體訊息入口（圖片/影片/檔案/聯絡人）：測試模式優先分析回報，否則走廣告偵測。"""
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not message or not chat or not user:
+        return
+    if (chat.id, user.id) in active_tests:
+        await test_message(update, context)
+        return
+    if chat.type in ("group", "supergroup"):
+        await handle_message_ad_check(update, context)
+
+
+NEUTRAL_BORDERLINE_THRESHOLD = 0.25  # 內容相似度到這個門檻以上，才值得去查發送者簡介（避免每則訊息都打 API）
+
+
+async def _check_sender_profile_ad_signal(bot, user) -> Tuple[bool, str]:
+    """訊息內容本身偏中性、判不出來時，參考發送者當下的用戶名／暱稱／簡介是否命中廣告模板庫。
+    跟入群時的帳號畫像檢查用同一套邏輯，只是這裡是在「訊息內容有點可疑但不夠格」時才觸發，
+    用來處理像「帶你一起搞錢」這種話術本身太中性、要配合帳號背景才能判斷的情況。"""
+    bio = ""
+    try:
+        user_chat = await bot.get_chat(user.id)
+        bio = user_chat.bio or ""
+    except Exception:
+        pass
+
+    fields = (
+        ("用戶名", f"@{user.username}" if user.username else ""),
+        ("暱稱", user.full_name or ""),
+        ("簡介", bio),
+    )
+    for label, field_text in fields:
+        if not field_text:
+            continue
+        hit, _score, hit_reason = detect_ad(field_text)
+        if hit:
+            return True, f"{label}命中模板庫[{hit_reason}]"
+    return False, ""
+
+
 async def handle_message_ad_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """偵測訊息是否為廣告，是則禁言並通知管理員"""
     message = update.effective_message
@@ -2639,6 +2694,14 @@ async def handle_message_ad_check(update: Update, context: ContextTypes.DEFAULT_
             is_ad = True
             confidence = 0.0
             reason = "重複洗版嫌疑（短時間內同樣內容重複出現）"
+        elif confidence >= NEUTRAL_BORDERLINE_THRESHOLD or check_neutral_phrase(text):
+            # 內容中性、單看文字判不出來，參考發送者當下的用戶名/暱稱/簡介
+            profile_hit, profile_reason = await _check_sender_profile_ad_signal(context.bot, user)
+            if profile_hit:
+                is_ad = True
+                reason = f"內容中性但發送者{profile_reason}（訊息相似度{confidence:.2f}）"
+            else:
+                return
         else:
             return
 
@@ -2841,7 +2904,7 @@ def main():
     # 沒有文字內容的純圖片/聯絡人則退回重複洗版偵測（見 _extract_check_text）。
     application.add_handler(MessageHandler(
         (filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.CONTACT) & ~filters.COMMAND,
-        handle_message_ad_check,
+        handle_media_message,
     ), group=0)
 
     application.add_handler(CallbackQueryHandler(on_proposal_setup,  pattern=r"^propsetup_"))
