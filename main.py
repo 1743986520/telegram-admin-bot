@@ -59,6 +59,8 @@ ADMIN_GROUP_LINK = "https://t.me/diacg_administration"
 # 數據存儲
 known_groups: Dict[int, Dict] = {}
 pending_verifications: Dict[int, Dict] = {}
+# 用戶最後一次看到的 (username, 暱稱)，用來偵測改名／改用戶名，改名時重新跑一次帳號畫像檢測
+known_profiles: Dict[int, Tuple[str, str]] = {}
 VERIFY_ATTEMPT_LIMIT = 3  # 圖片算術驗證碼最大嘗試次數，超過需管理員手動處理
 user_welcomed: Dict[Tuple[int, int], bool] = {}
 active_referendums: Dict[int, Dict] = {}        # chat_id -> 全員禁言公投狀態
@@ -340,6 +342,137 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"處理機器人狀態失敗: {e}")
 
+# ================== 帳號畫像命中：對外泛化文案 + 私下詳細通報 ==================
+# 「簡介命中通報」開關的用意：命中細節（究竟碰到哪條規則、哪個關鍵詞）只給
+# 管理員看，公開訊息一律用不透底的通用字樣，避免其他還在觀望的廣告帳號
+# 照著調整規避寫法。
+
+def _public_reason_text(reasons: list) -> str:
+    """把內部詳細原因（含規則名稱）轉成不洩漏偵測細節的公開文案。"""
+    public_labels = []
+    for r in reasons:
+        if "命中模板庫" in r:
+            public_labels.append("帳號資料異常")
+        else:
+            # @標籤 / 網址連結 / 非中文名稱 等既有分類本身已經夠籠統，可以照舊顯示
+            public_labels.append(r)
+    # 去重但保留原本順序
+    seen = set()
+    deduped = []
+    for label in public_labels:
+        if label not in seen:
+            seen.add(label)
+            deduped.append(label)
+    return "、".join(deduped) if deduped else "系統偵測異常"
+
+
+async def _notify_admin_group_silent(bot, text: str):
+    """把詳細偵測原因私下送到行政群組（ADMIN_GROUP_ID），不進當事人所在的一般群組，
+    避免公開洩漏規則細節。行政群組本身送失敗（例如未加入）時只記 log，不影響主流程。"""
+    try:
+        await bot.send_message(ADMIN_GROUP_ID, text, parse_mode="HTML")
+    except Exception as e:
+        logger.warning(f"行政群組靜默通報失敗: {e}")
+
+
+def _has_template_hit(reasons: list) -> bool:
+    """判斷這次可疑判定裡，是否包含「用戶名/暱稱/簡介直接命中廣告模板庫」這種
+    高信度規則命中（相對於單純 @標籤／連結／非中文名稱等較弱的軟性信號）。"""
+    return any("命中模板庫" in r for r in reasons)
+
+
+async def _scan_profile_for_ad_signal(bot, user, bio: str = None) -> Tuple[bool, list]:
+    """對用戶當下的用戶名／暱稱／簡介跑一次廣告模板庫掃描，回傳 (是否命中, 詳細原因列表)。
+    改名重新檢測與訊息內判不出來時的畫像輔助判斷共用同一份邏輯。"""
+    if bio is None:
+        bio = ""
+        try:
+            user_chat = await bot.get_chat(user.id)
+            bio = user_chat.bio or ""
+        except Exception:
+            pass
+    reasons = []
+    profile_fields = (
+        ("用戶名", f"@{user.username}" if user.username else ""),
+        ("暱稱", user.full_name or ""),
+        ("簡介", bio),
+    )
+    for field_label, field_text in profile_fields:
+        if not field_text:
+            continue
+        hit, _score, hit_reason = detect_ad(field_text)
+        if hit:
+            reasons.append(f"{field_label}命中模板庫[{hit_reason}]")
+    return len(reasons) > 0, reasons
+
+
+async def handle_profile_rename_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """在一般群組訊息中順手比對發送者目前的 (用戶名, 暱稱) 是否跟上次看到的不同；
+    改名／改用戶名時視同重新進行一次帳號畫像檢測，抓住入群時乾淨、進群後才改成
+    廣告名片的帳號。第一次看到的成員只記錄基準值，不回溯處罰。"""
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not message or not chat or not user or chat.type not in ("group", "supergroup"):
+        return
+    if not feature_enabled(known_groups.get(chat.id, {}), "profile_check"):
+        return
+    if not feature_enabled(known_groups.get(chat.id, {}), "rename_recheck"):
+        return
+
+    current = (user.username or "", user.full_name or "")
+    previous = known_profiles.get(user.id)
+    known_profiles[user.id] = current
+
+    if previous is None or previous == current:
+        return  # 第一次看到，或名稱沒變化
+
+    try:
+        member = await chat.get_member(user.id)
+        if member.status in ["administrator", "creator"]:
+            return
+    except Exception:
+        pass
+
+    hit, reasons = await _scan_profile_for_ad_signal(context.bot, user)
+    if not hit:
+        return
+
+    logger.warning(f"🔁 改名後命中廣告模板庫: {user.id} {previous} → {current}, 原因: {reasons}")
+
+    if feature_enabled(known_groups.get(chat.id, {}), "profile_hit_report"):
+        await _notify_admin_group_silent(
+            context.bot,
+            f"🔁 <b>改名重新檢測命中</b>\n"
+            f"群組：{chat.title}（{chat.id}）\n"
+            f"用戶：{user.mention_html()}\n"
+            f"改名前：{previous[1] or '（無暱稱）'} / @{previous[0] or '（無用戶名）'}\n"
+            f"改名後：{current[1] or '（無暱稱）'} / @{current[0] or '（無用戶名）'}\n"
+            f"原因：{', '.join(reasons)}",
+        )
+
+    if not feature_enabled(known_groups.get(chat.id, {}), "join_captcha"):
+        return  # 沒開公開驗證流程時，只靜默通報，不在群裡動作，交管理員自行判斷
+
+    has_perms, _perm_msg = await check_bot_permissions(context.bot, chat.id)
+    if not has_perms:
+        return
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id=chat.id,
+            user_id=user.id,
+            permissions=create_simple_mute_permissions(),
+        )
+        await context.bot.send_message(
+            chat.id,
+            f"🚫 {user.mention_html()} 改名後帳號資料命中異常規則，已禁言，"
+            f"需管理員手動確認後解除。",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.error(f"改名重新檢測禁言失敗: {e}")
+
+
 # ================== 處理新成員加入 ==================
 async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """處理普通成員加入"""
@@ -407,6 +540,9 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
                 return
 
+            # 記錄這次看到的 (用戶名, 暱稱) 基準值，供之後改名重新檢測比對
+            known_profiles[user.id] = (user.username or "", user.full_name or "")
+
             # 檢查用戶簡介
             bio = ""
             is_suspicious = False
@@ -452,8 +588,20 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         hard_block = True
                         reasons.append(f"{field_label}命中模板庫[{hit_reason}]")
 
+            group_profile_hit_report = feature_enabled(known_groups.get(chat.id, {}), "profile_hit_report")
+            group_join_captcha = feature_enabled(known_groups.get(chat.id, {}), "join_captcha")
+
             if hard_block:
                 logger.warning(f"🚫 高置信度廣告帳號: {user.id}, 原因: {reasons}")
+
+                if group_profile_hit_report and _has_template_hit(reasons):
+                    await _notify_admin_group_silent(
+                        context.bot,
+                        f"🚫 <b>入群高置信度廣告帳號</b>\n"
+                        f"群組：{chat.title}（{chat.id}）\n"
+                        f"用戶：{user.mention_html()}\n"
+                        f"原因：{', '.join(reasons)}",
+                    )
 
                 has_perms, perm_msg = await check_bot_permissions(context.bot, chat.id)
                 if not has_perms:
@@ -472,7 +620,7 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     )
                     await context.bot.send_message(
                         chat.id,
-                        f"🚫 {user.mention_html()} 用戶名/暱稱/簡介直接命中廣告模板庫（{', '.join(reasons)}），"
+                        f"🚫 {user.mention_html()} 帳號資料命中異常規則（{_public_reason_text(reasons)}），"
                         f"已直接禁言，不提供自助驗證，需管理員手動確認後解除。",
                         parse_mode="HTML"
                     )
@@ -482,7 +630,16 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
             if is_suspicious:
                 logger.info(f"⚠️ 可疑用戶: {user.id}, 原因: {reasons}")
-                
+
+                if group_profile_hit_report and _has_template_hit(reasons):
+                    await _notify_admin_group_silent(
+                        context.bot,
+                        f"⚠️ <b>入群可疑帳號</b>\n"
+                        f"群組：{chat.title}（{chat.id}）\n"
+                        f"用戶：{user.mention_html()}\n"
+                        f"原因：{', '.join(reasons)}",
+                    )
+
                 has_perms, perm_msg = await check_bot_permissions(context.bot, chat.id)
                 if not has_perms:
                     await context.bot.send_message(
@@ -491,7 +648,7 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         parse_mode="HTML"
                     )
                     return
-                
+
                 try:
                     # 完全禁言（禁止所有功能）
                     await context.bot.restrict_chat_member(
@@ -499,6 +656,12 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         user_id=user.id,
                         permissions=create_simple_mute_permissions(),
                     )
+
+                    if not group_join_captcha:
+                        # 關閉公開驗證流程：靜默禁言 + （已於上方）私下通報，交管理員自行判斷解除，
+                        # 群組內不出現任何提示，避免公開挑戰流程本身也被拿去研究規避。
+                        logger.info(f"🔕 靜默模式（join_captcha 關閉）：{user.id} 已禁言但不公開提示")
+                        return
 
                     # 記錄待驗證信息（此時還沒出題，題目留到按下開始驗證才產生）
                     pending_verifications[user.id] = {
@@ -518,7 +681,7 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
                     sent = await context.bot.send_message(
                         chat.id,
-                        f"⚠️ {user.mention_html()} 需要人機驗證（{', '.join(reasons)}）\n"
+                        f"⚠️ {user.mention_html()} 需要人機驗證（{_public_reason_text(reasons)}）\n"
                         f"請點下方按鈕開始驗證（{VERIFY_ATTEMPT_LIMIT} 次機會，30 分鐘內有效）",
                         reply_markup=InlineKeyboardMarkup(keyboard),
                         parse_mode="HTML"
@@ -2669,10 +2832,15 @@ async def handle_message_ad_check(update: Update, context: ContextTypes.DEFAULT_
 
     if not message or not user or not chat:
         return
+    if chat.type == "private":
+        return
+
+    # 改名重新檢測：跟訊息內容廣告偵測互相獨立，即使 ad_detection 關閉也照跑，
+    # 由 profile_check + rename_recheck 兩個開關各自控制。
+    await handle_profile_rename_check(update, context)
+
     text = _extract_check_text(message)
     if not text:
-        return
-    if chat.type == "private":
         return
     if (chat.id, message.message_id) in consumed_sample_messages:
         consumed_sample_messages.discard((chat.id, message.message_id))

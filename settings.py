@@ -15,6 +15,9 @@ DEFAULT_FEATURES = {
     "proposals": True,
     "banme": True,
     "ban_command": True,
+    "join_captcha": True,
+    "profile_hit_report": True,
+    "rename_recheck": True,
 }
 
 FEATURE_LABELS = {
@@ -29,6 +32,9 @@ FEATURE_LABELS = {
     "proposals": "自訂提案",
     "banme": "/banme 彩蛋禁言",
     "ban_command": "/ban 管理員禁言",
+    "join_captcha": "入群人機驗證",
+    "profile_hit_report": "簡介命中通報",
+    "rename_recheck": "改名重新檢測",
 }
 
 
