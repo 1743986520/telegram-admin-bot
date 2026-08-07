@@ -18,6 +18,8 @@ DEFAULT_FEATURES = {
     "join_captcha": True,
     "profile_hit_report": True,
     "rename_recheck": True,
+    "block_contact_share": True,
+    "external_quote_check": True,
 }
 
 FEATURE_LABELS = {
@@ -35,6 +37,8 @@ FEATURE_LABELS = {
     "join_captcha": "入群人機驗證",
     "profile_hit_report": "簡介命中通報",
     "rename_recheck": "改名重新檢測",
+    "block_contact_share": "非管理員分享聯絡人卡片阻擋",
+    "external_quote_check": "跨群引用廣告偵測",
 }
 
 

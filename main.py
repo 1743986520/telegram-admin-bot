@@ -2824,6 +2824,35 @@ async def _check_sender_profile_ad_signal(bot, user) -> Tuple[bool, str]:
     return False, ""
 
 
+# 跨群引用廣告：Telegram 允許在完全沒加入某頻道/群組的情況下，對該頻道/群組裡的
+# 一則公開訊息按「引用回覆」，把這個引用（含來源聊天室資訊的卡片）帶到任何其他
+# 群組發出去，而新訊息本身的文字可以隨便打（符號、數字都行），完全繞過純文字比對。
+# Bot API 7.0 之後這種情況會出現在 message.external_reply（來源聊天室資訊）跟
+# message.quote（被引用的原文片段）欄位裡，用 getattr 保守存取，避免因為
+# python-telegram-bot 版本差異或欄位不存在而整支炸掉。
+def _extract_external_reference_signal(message) -> Tuple[bool, str]:
+    """偵測訊息是否『引用』了另一個聊天室（頻道/群組）的訊息，且該聊天室不是目前所在的群組。
+    回傳 (是否為跨群引用, 描述文字[來源聊天室標題/用戶名 + 被引用片段])。"""
+    ext = getattr(message, "external_reply", None)
+    if ext is None:
+        return False, ""
+    origin = getattr(ext, "origin", None)
+    origin_type = getattr(origin, "type", "") if origin else ""
+    # 只關心來源是頻道或（超級）群組的情況；引用自然人訊息、隱藏用戶等不算此類廣告載體
+    if origin_type not in ("channel", "chat"):
+        return False, ""
+    origin_chat = getattr(ext, "chat", None)
+    origin_title = (getattr(origin_chat, "title", "") or "") if origin_chat else ""
+    origin_username = (getattr(origin_chat, "username", "") or "") if origin_chat else ""
+    quote = getattr(message, "quote", None)
+    quote_text = (getattr(quote, "text", "") or "") if quote else ""
+    if not origin_title and not origin_username and not quote_text:
+        return False, ""
+    label = origin_title or (f"@{origin_username}" if origin_username else "未知聊天室")
+    desc = f"引用自「{label}」" + (f"：{quote_text}" if quote_text else "")
+    return True, desc
+
+
 async def handle_message_ad_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """偵測訊息是否為廣告，是則禁言並通知管理員"""
     message = update.effective_message
@@ -2856,7 +2885,26 @@ async def handle_message_ad_check(update: Update, context: ContextTypes.DEFAULT_
     except Exception:
         pass
 
-    is_ad, confidence, reason = detect_ad(text)
+    # 分享聯絡人卡片：姓名/電話欄位可以隨便填，等於一個不會被關鍵字比對卡住的
+    # 廣告載體（合成字串一樣會拿去跑 detect_ad，但這裡直接把「非管理員分享聯絡人」
+    # 本身當成廣告訊號處理，不用等關鍵字命中，公開群組本來就幾乎沒有分享聯絡人
+    # 卡片的正常需求）。
+    if message.contact is not None and feature_enabled(known_groups.get(chat.id, {}), "block_contact_share"):
+        is_ad, confidence, reason = True, 0.0, "非管理員分享聯絡人卡片（一律視為廣告，不需命中關鍵字）"
+    else:
+        is_ad = False
+        confidence, reason = 0.0, ""
+        if feature_enabled(known_groups.get(chat.id, {}), "external_quote_check"):
+            ext_hit, ext_desc = _extract_external_reference_signal(message)
+            if ext_hit:
+                # 引用內容本身也拿去跑一次關鍵字/相似度比對，命中的話原因更精確；
+                # 沒命中也一樣視為可疑（因為這個管道原本就是設計來繞過文字比對的）。
+                ext_is_ad, ext_conf, ext_reason = detect_ad(ext_desc)
+                is_ad = True
+                confidence = ext_conf if ext_is_ad else 0.0
+                reason = f"跨群引用可疑（{ext_desc}）" + (f"｜{ext_reason}" if ext_is_ad else "")
+        if not is_ad:
+            is_ad, confidence, reason = detect_ad(text)
     if not is_ad:
         if _check_repeat_flood(chat.id, text):
             is_ad = True
