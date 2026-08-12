@@ -43,6 +43,13 @@ class ObfuscatedAdTests(unittest.TestCase):
         這是黑產來聚會了？想討論黑產氾濫程度，避免誤殺。"""
         self.assertFalse(detect_ad(text)[0])
 
+    def test_adult_entertainment_venue_promotion(self):
+        text = "杭州商K真空场｜妹子05 06会玩·节目齐全·沙发秀 @KTVZHUZI"
+        self.assertTrue(detect_ad(text)[0])
+
+    def test_plain_ktv_mention_is_not_an_ad_signal(self):
+        self.assertFalse(detect_ad("今晚去KTV唱歌")[0])
+
 
 if __name__ == "__main__":
     unittest.main()
