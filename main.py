@@ -50,9 +50,9 @@ logger = logging.getLogger(__name__)
 
 # === 重要：必須修改這兩個值 ===
 OWNER_ID = 7807347685  # 改成你的 Telegram ID
-BOT_VERSION = "v3.4.0-custom-proposal"
+BOT_VERSION = "v3.4.0"
 
-# 行政頻道（自訂提案結果公告 + 置頂）
+# 行政頻道（公投結果公告 + 置頂）
 ADMIN_GROUP_ID = -1003502034749
 ADMIN_GROUP_LINK = "https://t.me/diacg_administration"
 
@@ -64,8 +64,6 @@ known_profiles: Dict[int, Tuple[str, str]] = {}
 VERIFY_ATTEMPT_LIMIT = 3  # 圖片算術驗證碼最大嘗試次數，超過需管理員手動處理
 user_welcomed: Dict[Tuple[int, int], bool] = {}
 active_referendums: Dict[int, Dict] = {}        # chat_id -> 全員禁言公投狀態
-active_proposals: Dict[int, Dict] = {}          # chat_id -> 自訂提案狀態
-pending_proposal_setup: Dict[Tuple[int,int], Dict] = {}  # (chat_id, user_id) -> 待確認匿名設定
 pending_sample_actions: Dict[Tuple[int, int], str] = {}  # (chat_id, user_id) -> add_ad/whitelist
 consumed_sample_messages = set()  # (chat_id, message_id)，避免樣本輸入再進廣告偵測
 pending_false_positive_samples: Dict[str, dict] = {}  # token -> {"text","chat_id","user_id"}
@@ -1697,7 +1695,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /help - 詳細幫助
 /banme - 自願禁言2分鐘
 /vote - 發起全員禁言公投
-/propose <內容> - 發起自訂提案
 /list - 查看管理群組
 /ban - 管理員禁言用戶
 /update - 更新機器人代碼並重啟
@@ -1753,7 +1750,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/banme - 彩蛋禁言\n"
         "/ban - 管理員禁言\n"
         "/vote - 發起禁言公投\n"
-        "/propose <內容> - 發起提案\n"
         "/addsample - 加入廣告樣本\n"
         "/whitelist - 加入非廣告樣本\n"
         "/samples [wl] - 檢視並刪除動態樣本庫內容（wl 看白樣本庫）\n"
@@ -3082,7 +3078,6 @@ def main():
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("feature", feature_command))
     application.add_handler(CommandHandler("vote", referendum_command))
-    application.add_handler(CommandHandler("propose", propose_command))
     application.add_handler(CommandHandler("ban", ban_command))
     application.add_handler(CommandHandler("update", update_command))
     application.add_handler(CommandHandler("updatead", updatead_command))
@@ -3123,8 +3118,6 @@ def main():
         handle_media_message,
     ), group=0)
 
-    application.add_handler(CallbackQueryHandler(on_proposal_setup,  pattern=r"^propsetup_"))
-    application.add_handler(CallbackQueryHandler(on_proposal_vote,   pattern=r"^prop_"))
     application.add_handler(CallbackQueryHandler(on_referendum_vote, pattern=r"^ref_"))
     application.add_handler(CallbackQueryHandler(on_captcha_start_click, pattern=r"^captchastart_"))
     application.add_handler(CallbackQueryHandler(on_captcha_click, pattern=r"^captcha_"))
