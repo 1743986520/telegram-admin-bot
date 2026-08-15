@@ -20,7 +20,7 @@ import urllib.parse
 import urllib.request
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -87,11 +87,13 @@ class WebVerificationServer:
         self,
         loop,
         on_success: Callable[[str, int], Awaitable[None]],
+        admin_callback: Optional[Callable[[int, str, dict], Awaitable[dict]]] = None,
         host: str = "0.0.0.0",
         port: Optional[int] = None,
     ):
         self.loop = loop
         self.on_success = on_success
+        self.admin_callback = admin_callback
         self.host = host
         self.port = port or int(os.getenv("WEB_VERIFY_PORT", "8080"))
         self.base_url = os.getenv("WEB_VERIFY_BASE_URL", "").rstrip("/")
@@ -136,6 +138,9 @@ class WebVerificationServer:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def _json(self, status, data):
+                self._send(status, "application/json; charset=utf-8", json.dumps(data, ensure_ascii=False))
+
             def _session(self, token):
                 with server.lock:
                     session = server.sessions.get(token)
@@ -166,6 +171,9 @@ class WebVerificationServer:
                 if path == "/miniapp":
                     self._send(HTTPStatus.OK, "text/html; charset=utf-8", _miniapp_page())
                     return
+                if path == "/admin":
+                    self._send(HTTPStatus.OK, "text/html; charset=utf-8", _admin_page())
+                    return
                 prefix = "/verify/"
                 if path.startswith(prefix):
                     token = path[len(prefix):]
@@ -180,6 +188,36 @@ class WebVerificationServer:
 
             def do_POST(self):
                 path = urllib.parse.urlparse(self.path).path
+                if path == "/api/admin":
+                    if not server.admin_callback:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "管理面板未啟用"})
+                        return
+                    length = min(int(self.headers.get("Content-Length", "0")), 50000)
+                    raw = self.rfile.read(length)
+                    form = urllib.parse.parse_qs(raw.decode("utf-8", "replace"))
+                    init_data = form.get("init_data", [""])[0]
+                    user_id = _telegram_webapp_user_id(server.bot_token, init_data)
+                    if not user_id:
+                        self._json(HTTPStatus.FORBIDDEN, {"error": "Telegram 身份驗證失敗"})
+                        return
+                    try:
+                        payload = json.loads(form.get("payload", ["{}"]) [0])
+                    except (TypeError, json.JSONDecodeError):
+                        payload = {}
+                    action = form.get("action", [""])[0]
+                    future = __import__("asyncio").run_coroutine_threadsafe(
+                        server.admin_callback(user_id, action, payload), server.loop
+                    )
+                    try:
+                        self._json(HTTPStatus.OK, future.result(timeout=15))
+                    except PermissionError as exc:
+                        self._json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
+                    except ValueError as exc:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    except Exception as exc:
+                        logger.exception("Admin API failed: %s", type(exc).__name__)
+                        self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "管理操作失敗"})
+                    return
                 prefix = "/verify/"
                 if not path.startswith(prefix):
                     self._send(HTTPStatus.NOT_FOUND, "text/plain; charset=utf-8", "Not found")
@@ -245,6 +283,9 @@ class WebVerificationServer:
             f"?startapp={urllib.parse.quote(token, safe='')}"
         )
 
+    def admin_url(self) -> str:
+        return f"https://t.me/{urllib.parse.quote(self.bot_username, safe='')}?startapp=admin"
+
     def stop(self):
         if self.httpd:
             self.httpd.shutdown()
@@ -275,28 +316,36 @@ def _verify_turnstile(secret: str, token: str) -> bool:
 
 def _verify_telegram_webapp(bot_token: str, init_data: str, expected_user_id: int) -> bool:
     """Verify Telegram Mini App initData and bind it to the challenged user."""
+    return _telegram_webapp_user_id(bot_token, init_data) == int(expected_user_id)
+
+
+def _telegram_webapp_user_id(bot_token: str, init_data: str) -> Optional[int]:
+    """Return the authenticated Mini App user ID, or None for invalid data."""
     if not bot_token or not init_data:
-        return False
+        return None
     fields = dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True))
     received_hash = fields.pop("hash", "")
     if not received_hash:
-        return False
+        return None
     try:
         user = json.loads(fields.get("user", "{}"))
-        if int(user.get("id")) != int(expected_user_id):
-            return False
+        user_id = int(user.get("id"))
         if abs(time.time() - int(fields.get("auth_date", "0"))) > TELEGRAM_AUTH_TTL:
-            return False
+            return None
     except (TypeError, ValueError, json.JSONDecodeError):
-        return False
+        return None
     data_check_string = "\n".join(f"{key}={fields[key]}" for key in sorted(fields))
     secret_key = hmac.new(b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256).digest()
     expected_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected_hash, received_hash)
+    return user_id if hmac.compare_digest(expected_hash, received_hash) else None
 
 
 def _miniapp_page() -> str:
-    return """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Telegram 驗證</title></head><body><p>正在開啟驗證…</p><script src="https://telegram.org/js/telegram-web-app.js"></script><script>if(window.Telegram&&Telegram.WebApp){Telegram.WebApp.ready();const token=Telegram.WebApp.initDataUnsafe&&Telegram.WebApp.initDataUnsafe.start_param;if(token){location.replace('/verify/'+encodeURIComponent(token));}else{document.body.innerHTML='<p>無效的驗證連結，請回群組重新取得。</p>';}}else{document.body.innerHTML='<p>請從 Telegram 內開啟此驗證。</p>';}</script></body></html>"""
+    return """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Telegram</title></head><body><p>正在開啟…</p><script src="https://telegram.org/js/telegram-web-app.js"></script><script>if(window.Telegram&&Telegram.WebApp){Telegram.WebApp.ready();const param=Telegram.WebApp.initDataUnsafe&&Telegram.WebApp.initDataUnsafe.start_param;if(param==='admin'){location.replace('/admin');}else if(param){location.replace('/verify/'+encodeURIComponent(param));}else{document.body.innerHTML='<p>無效的連結，請重新取得。</p>';}}else{document.body.innerHTML='<p>請從 Telegram 內開啟。</p>';}</script></body></html>"""
+
+
+def _admin_page() -> str:
+    return """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>群組管理</title><script src="https://telegram.org/js/telegram-web-app.js"></script><style>body{font-family:system-ui,sans-serif;background:#101827;color:#eef4ff;margin:0;padding:16px}main{max-width:720px;margin:auto}.card{background:#17243a;border-radius:14px;padding:16px;margin:12px 0}select,input,textarea,button{box-sizing:border-box;width:100%;padding:10px;border-radius:8px;border:1px solid #58708f;background:#0e1726;color:#fff;margin-top:8px}button{background:#4fa3ff;color:#07111f;font-weight:700;border:0}.feature{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid #30445f}.feature button{width:auto;margin:0;padding:7px 12px}.sample{display:flex;gap:8px;align-items:center;border-bottom:1px solid #30445f;padding:8px 0}.sample span{flex:1;white-space:pre-wrap;word-break:break-word}.sample button{width:auto;margin:0;background:#d85c6b;color:white}.muted{color:#a9bdd8}.error{color:#ff9a9a}</style></head><body><main><h1>群組管理</h1><p id="status" class="muted">正在載入…</p><section class="card"><h2>群組設定</h2><select id="groups"></select><div id="features"></div></section><section class="card"><h2>廣告樣本</h2><p class="muted">僅 Bot 擁有者可管理樣本。</p><textarea id="sample" rows="4" placeholder="輸入完整廣告樣本"></textarea><button onclick="addSample()">加入廣告樣本</button><div id="samples"></div></section></main><script>Telegram.WebApp.ready();Telegram.WebApp.expand();const initData=Telegram.WebApp.initData;let state={};async function api(action,payload={}){const body=new URLSearchParams({init_data:initData,action,payload:JSON.stringify(payload)});const r=await fetch('/api/admin',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();if(!r.ok)throw Error(d.error||'操作失敗');return d;}function esc(s){return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\'':'&#39;','"':'&quot;'}[c]));}function showError(e){document.getElementById('status').textContent=e.message;document.getElementById('status').className='error';}async function load(){try{state=await api('bootstrap');document.getElementById('status').textContent='已登入，可管理你有權限的群組';const sel=document.getElementById('groups');sel.innerHTML=state.groups.map(g=>`<option value="${g.id}">${esc(g.title)}</option>`).join('');sel.onchange=renderFeatures;renderFeatures();renderSamples();}catch(e){showError(e);}}async function renderFeatures(){const id=document.getElementById('groups').value;const g=state.groups.find(x=>String(x.id)===String(id));document.getElementById('features').innerHTML=g?Object.entries(g.features).map(([k,v])=>`<div class="feature"><span>${esc(g.labels[k]||k)}</span><button onclick="toggle('${k}',${!v})">${v?'✅ 開啟':'⛔ 關閉'}</button></div>`).join(''):'沒有可管理的群組';}async function toggle(name,value){try{const id=Number(document.getElementById('groups').value);const d=await api('set_feature',{chat_id:id,feature:name,enabled:value});const g=state.groups.find(x=>x.id===id);g.features=d.features;renderFeatures();}catch(e){showError(e);}}function renderSamples(){document.getElementById('samples').innerHTML=(state.samples||[]).map((s,i)=>`<div class="sample"><span>${esc(s)}</span><button onclick="removeSample(${i})">刪除</button></div>`).join('')||'<p class="muted">尚無廣告樣本</p>';}async function addSample(){try{const text=document.getElementById('sample').value.trim();if(!text)return;state.samples=await api('add_sample',{text}).then(d=>d.samples);document.getElementById('sample').value='';renderSamples();}catch(e){showError(e);}}async function removeSample(index){try{state.samples=await api('remove_sample',{index}).then(d=>d.samples);renderSamples();}catch(e){showError(e);}}load();</script></body></html>"""
 
 
 def _page(token: str, site_key: str, captcha: str, bot_username: str, error: str = "") -> str:

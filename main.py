@@ -59,6 +59,7 @@ ADMIN_GROUP_LINK = "https://t.me/diacg_administration"
 
 # 數據存儲
 known_groups: Dict[int, Dict] = {}
+application_bot = None
 pending_verifications: Dict[int, Dict] = {}
 web_verification_server: Optional[WebVerificationServer] = None
 # 用戶最後一次看到的 (username, 暱稱)，用來偵測改名／改用戶名，改名時重新跑一次帳號畫像檢測
@@ -1745,6 +1746,68 @@ async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(groups_text, parse_mode="Markdown")
 
 
+async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Open the Telegram Mini App group management panel."""
+    if not update.effective_message or not update.effective_user:
+        return
+    if not web_verification_server:
+        await update.effective_message.reply_text("❌ Mini App 管理面板尚未啟用。")
+        return
+    if update.effective_user.id != OWNER_ID and update.effective_chat and update.effective_chat.type == "private":
+        await update.effective_message.reply_text("請在要管理的群組中使用 /panel。")
+        return
+    await update.effective_message.reply_text(
+        "⚙️ 開啟群組管理面板：",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("開啟管理面板", url=web_verification_server.admin_url())]]),
+    )
+
+
+async def admin_panel_api(user_id: int, action: str, payload: dict) -> dict:
+    """Mini App API for group settings and owner-managed ad samples."""
+    if action == "bootstrap":
+        groups = []
+        for raw_chat_id, info in known_groups.items():
+            chat_id = int(raw_chat_id)
+            if not await is_group_admin(application_bot, chat_id, user_id):
+                continue
+            groups.append({
+                "id": chat_id,
+                "title": info.get("title", str(chat_id)),
+                "features": get_group_features(info),
+                "labels": FEATURE_LABELS,
+            })
+        from ad_samples import load_ad_samples
+        return {"groups": groups, "samples": load_ad_samples() if user_id == OWNER_ID else []}
+    if action == "set_feature":
+        chat_id = int(payload.get("chat_id"))
+        feature = str(payload.get("feature", ""))
+        enabled = bool(payload.get("enabled"))
+        if not await is_group_admin(application_bot, chat_id, user_id):
+            raise PermissionError("沒有此群組的管理員權限")
+        if feature not in DEFAULT_FEATURES:
+            raise ValueError("功能名稱無效")
+        known_groups.setdefault(chat_id, {"title": str(chat_id), "status": "active"})
+        set_group_feature(known_groups, chat_id, feature, enabled)
+        save_known_groups()
+        return {"features": get_group_features(known_groups[chat_id])}
+    if action in {"add_sample", "remove_sample"}:
+        if user_id != OWNER_ID:
+            raise PermissionError("只有 Bot 擁有者可以管理廣告樣本")
+        from ad_samples import add_ad_sample, load_ad_samples, remove_ad_sample
+        if action == "add_sample":
+            text = str(payload.get("text", "")).strip()
+            if not text or not add_ad_sample(text):
+                raise ValueError("樣本為空、重複，或已存在於原生模板庫")
+        else:
+            items = load_ad_samples()
+            index = int(payload.get("index"))
+            if index < 0 or index >= len(items) or not remove_ad_sample(items[index]):
+                raise ValueError("樣本不存在或已被移除")
+        _reload_detector()
+        return {"samples": load_ad_samples()}
+    raise ValueError("未知管理操作")
+
+
 async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """處理 /update 指令：從 GitHub 拉取最新代碼並重啟機器人"""
     user = update.effective_user
@@ -2724,6 +2787,8 @@ def main():
     
     # 創建應用
     application = Application.builder().token(bot_token).build()
+    global application_bot
+    application_bot = application.bot
 
     # 有完整環境變數時啟用 Web 數字圖片 + Turnstile；未配置則保留 Telegram 驗證碼回退。
     global web_verification_server
@@ -2733,8 +2798,11 @@ def main():
         async def _web_success(token: str, user_id: int):
             await complete_web_verification(application.bot, token, user_id)
 
+        async def _admin_callback(user_id: int, action: str, payload: dict):
+            return await admin_panel_api(user_id, action, payload)
+
         try:
-            web_verification_server = WebVerificationServer(loop, _web_success)
+            web_verification_server = WebVerificationServer(loop, _web_success, admin_callback=_admin_callback)
             web_verification_server.start()
             logger.info("🌐 Web 驗證服務已啟動：%s", web_verification_server.base_url)
         except Exception as exc:
@@ -2751,6 +2819,7 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("banme", banme))
     application.add_handler(CommandHandler("list", list_groups))
+    application.add_handler(CommandHandler("panel", admin_panel_command))
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("feature", feature_command))
     application.add_handler(CommandHandler("vote", referendum_command))
