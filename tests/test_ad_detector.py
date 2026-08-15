@@ -50,6 +50,10 @@ class ObfuscatedAdTests(unittest.TestCase):
     def test_plain_ktv_mention_is_not_an_ad_signal(self):
         self.assertFalse(detect_ad("今晚去KTV唱歌")[0])
 
+    def test_illicit_product_codewords_with_contact(self):
+        text = "🥰上头燃料weeb叶子 @yiqifeiqilai9"
+        self.assertTrue(detect_ad(text)[0])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,6 +12,7 @@ import uuid
 import random
 from PIL import Image, ImageDraw, ImageFont
 from ad_detector import detect_ad, clean_text, check_neutral_phrase
+from web_verification import WebVerificationServer, is_configured as web_verification_configured
 from settings import (
     DEFAULT_FEATURES,
     FEATURE_LABELS,
@@ -59,6 +60,7 @@ ADMIN_GROUP_LINK = "https://t.me/diacg_administration"
 # 數據存儲
 known_groups: Dict[int, Dict] = {}
 pending_verifications: Dict[int, Dict] = {}
+web_verification_server: Optional[WebVerificationServer] = None
 # 用戶最後一次看到的 (username, 暱稱)，用來偵測改名／改用戶名，改名時重新跑一次帳號畫像檢測
 known_profiles: Dict[int, Tuple[str, str]] = {}
 VERIFY_ATTEMPT_LIMIT = 3  # 圖片算術驗證碼最大嘗試次數，超過需管理員手動處理
@@ -673,14 +675,26 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         "message_ref": None,
                     }
 
-                    keyboard = [[
-                        InlineKeyboardButton("🔍 開始真人驗證", callback_data=f"captchastart_{user.id}")
-                    ]]
+                    keyboard = []
+                    verify_text = (
+                        f"⚠️ {user.mention_html()} 需要人機驗證（{_public_reason_text(reasons)}）\n"
+                    )
+                    if web_verification_server:
+                        token = web_verification_server.create_session(user.id, chat.id)
+                        pending_verifications[user.id]["web_token"] = token
+                        keyboard = [[
+                            InlineKeyboardButton("🌐 開啟網頁驗證", url=web_verification_server.url(token))
+                        ]]
+                        verify_text += "請點下方按鈕，完成數字圖片與 Cloudflare 驗證（5 分鐘內有效）"
+                    else:
+                        keyboard = [[
+                            InlineKeyboardButton("🔍 開始真人驗證", callback_data=f"captchastart_{user.id}")
+                        ]]
+                        verify_text += f"請點下方按鈕開始驗證（{VERIFY_ATTEMPT_LIMIT} 次機會，30 分鐘內有效）"
 
                     sent = await context.bot.send_message(
                         chat.id,
-                        f"⚠️ {user.mention_html()} 需要人機驗證（{_public_reason_text(reasons)}）\n"
-                        f"請點下方按鈕開始驗證（{VERIFY_ATTEMPT_LIMIT} 次機會，30 分鐘內有效）",
+                        verify_text,
                         reply_markup=InlineKeyboardMarkup(keyboard),
                         parse_mode="HTML"
                     )
@@ -940,6 +954,28 @@ async def on_captcha_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"圖片驗證碼處理失敗: {e}")
+
+
+async def complete_web_verification(bot, token: str, user_id: int):
+    """完成 Web CAPTCHA + Turnstile 後解除 Telegram 限制。"""
+    verify_info = pending_verifications.get(user_id)
+    if not verify_info or verify_info.get("web_token") != token:
+        raise RuntimeError("驗證狀態已過期或不匹配")
+    chat_id = verify_info["chat_id"]
+    await bot.restrict_chat_member(
+        chat_id=chat_id,
+        user_id=user_id,
+        permissions=create_simple_unmute_permissions(),
+    )
+    pending_verifications.pop(user_id, None)
+    message_ref = verify_info.get("message_ref") or {}
+    if message_ref:
+        try:
+            await bot.delete_message(message_ref["chat_id"], message_ref["message_id"])
+        except Exception:
+            pass
+    if verify_info.get("needs_welcome", False):
+        await send_welcome_message(bot, chat_id, user_id, verify_info["user_name"], force_send=True)
 
 
 # ================== 驗證按鈕處理 ==================
@@ -1296,387 +1332,6 @@ async def on_referendum_vote(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.answer("❌ 已投反對票")
 
     await check_referendum_state(context, chat_id, query)
-
-
-# ================== 自訂提案系統 ==================
-# 規則：
-#   - 任何成員均可發起，每群同時只能有一個自訂提案
-#   - 發起時可選擇是否匿名（匿名則隱藏發起人姓名）
-#   - 通過條件：同意票數率先達到 10 票
-#   - 即時否決條件：反對票數任何時刻超過同意票數（不等 = 超過才否決）
-#   - 無延長輪次，結果確立後立即結束
-#   - 無論通過或否決，均向行政頻道 ADMIN_GROUP_ID 發送公告並置頂
-#   - 逾時：提案發起後 30 分鐘無人達標則自動否決（防死票）
-
-PROPOSAL_TARGET = 10          # 通過所需同意票
-PROPOSAL_TIMEOUT_MIN = 30     # 提案逾時分鐘數
-
-
-def build_proposal_text(chat_id: int) -> str:
-    """建立自訂提案訊息文字"""
-    prop = active_proposals.get(chat_id)
-    if not prop:
-        return "提案已結束"
-
-    yes_count = len(prop["yes_votes"])
-    no_count  = len(prop["no_votes"])
-    initiator = "（匿名）" if prop["anonymous"] else prop["initiator_name"]
-    topic = prop["topic"]
-    elapsed = int((time.time() - prop["started_at"]) / 60)
-    remaining = max(0, PROPOSAL_TIMEOUT_MIN - elapsed)
-
-    warning = ""
-    if no_count > 0 and (yes_count - no_count) <= 5:
-        gap = yes_count - no_count
-        warning = f"\n⚠️ <b>注意：反對票距否決門檻還差 {max(0, 5 - (no_count - yes_count) if no_count > yes_count else 5 + gap)} 票！（反對超過同意 5 票即否決）</b>"
-
-    return (
-        f"📋 <b>提案投票</b>\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"📌 <b>提案內容：</b>{topic}\n"
-        f"👤 <b>發起人：</b>{initiator}\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"✅ 同意：<b>{yes_count}</b> 票　❌ 反對：<b>{no_count}</b> 票\n"
-        f"🎯 通過門檻：<b>{PROPOSAL_TARGET} 票同意</b>\n"
-        f"⏱️ 剩餘時間：約 <b>{remaining}</b> 分鐘{warning}\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"每人限投一票，可隨時更換。\n"
-        f"⚠️ 若反對票數超過同意票數 <b>5 票以上</b>，提案即時否決。"
-    )
-
-
-def build_proposal_keyboard(chat_id: int) -> InlineKeyboardMarkup:
-    """建立自訂提案按鈕"""
-    prop = active_proposals.get(chat_id)
-    yes_count = len(prop["yes_votes"]) if prop else 0
-    no_count  = len(prop["no_votes"])  if prop else 0
-    keyboard = [[
-        InlineKeyboardButton(f"✅ 同意 ({yes_count})", callback_data=f"prop_yes_{chat_id}"),
-        InlineKeyboardButton(f"❌ 反對 ({no_count})",  callback_data=f"prop_no_{chat_id}"),
-    ]]
-    return InlineKeyboardMarkup(keyboard)
-
-
-async def report_to_admin_group(bot, source_chat_title: str, source_chat_id: int,
-                                 topic: str, initiator_name: str, anonymous: bool,
-                                 yes_count: int, no_count: int, passed: bool, reason: str):
-    """向行政頻道發送提案結果公告並置頂"""
-    result_emoji = "✅ 通過" if passed else "❌ 否決"
-    initiator_str = "（匿名）" if anonymous else initiator_name
-    ts = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
-
-    text = (
-        f"📢 <b>提案公告</b>\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"🏠 <b>群組：</b>{source_chat_title}（<code>{source_chat_id}</code>）\n"
-        f"📌 <b>提案：</b>{topic}\n"
-        f"👤 <b>發起人：</b>{initiator_str}\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"🗳️ <b>結果：{result_emoji}</b>\n"
-        f"✅ 同意：<b>{yes_count}</b> 票　❌ 反對：<b>{no_count}</b> 票\n"
-        f"📝 <b>原因：</b>{reason}\n"
-        f"🕐 <b>時間：</b>{ts}\n"
-        f"━━━━━━━━━━━━━━━"
-    )
-
-    try:
-        msg = await bot.send_message(ADMIN_GROUP_ID, text, parse_mode="HTML")
-        try:
-            await bot.pin_chat_message(
-                chat_id=ADMIN_GROUP_ID,
-                message_id=msg.message_id,
-                disable_notification=False,
-            )
-            logger.info(f"📌 已置頂行政頻道公告 msg_id={msg.message_id}")
-        except Exception as e:
-            logger.warning(f"置頂失敗（可能缺少置頂權限）: {e}")
-    except Exception as e:
-        logger.error(f"發送行政頻道公告失敗: {e}")
-
-
-async def proposal_timeout_task(context, chat_id: int):
-    """提案逾時自動否決"""
-    await asyncio.sleep(PROPOSAL_TIMEOUT_MIN * 60)
-
-    prop = active_proposals.get(chat_id)
-    if not prop:
-        return  # 已結束
-
-    yes_count = len(prop["yes_votes"])
-    no_count  = len(prop["no_votes"])
-    prop_copy = active_proposals.pop(chat_id, None)
-
-    timeout_text = (
-        f"🗳️ <b>提案結束（逾時）</b>\n"
-        f"📌 <b>提案：</b>{prop['topic']}\n"
-        f"❌ <b>結果：否決</b>（{PROPOSAL_TIMEOUT_MIN} 分鐘內未達 {PROPOSAL_TARGET} 票同意）\n"
-        f"✅ 同意 {yes_count} 票　❌ 反對 {no_count} 票"
-    )
-    try:
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=prop["message_id"],
-            text=timeout_text,
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        logger.warning(f"更新逾時提案訊息失敗: {e}")
-
-    source_title = known_groups.get(chat_id, {}).get("title", str(chat_id))
-    await report_to_admin_group(
-        context.bot, source_title, chat_id,
-        prop["topic"], prop["initiator_name"], prop["anonymous"],
-        yes_count, no_count, passed=False,
-        reason=f"逾時 {PROPOSAL_TIMEOUT_MIN} 分鐘，未達通過門檻"
-    )
-
-
-async def check_proposal_state(context, chat_id: int, query=None):
-    """每次投票後檢查提案狀態"""
-    prop = active_proposals.get(chat_id)
-    if not prop:
-        return
-
-    yes_count = len(prop["yes_votes"])
-    no_count  = len(prop["no_votes"])
-
-    # ── 即時否決：反對票超過同意票 5 票以上 ──
-    if no_count >= yes_count + 5:
-        task = prop.get("timeout_task")
-        if task and not task.done():
-            task.cancel()
-        prop_data = active_proposals.pop(chat_id, None)
-
-        reject_text = (
-            f"🗳️ <b>提案結束</b>\n"
-            f"📌 <b>提案：</b>{prop_data['topic']}\n"
-            f"❌ <b>結果：否決</b>（反對票超過同意票 5 票以上）\n"
-            f"✅ 同意 {yes_count} 票　❌ 反對 {no_count} 票"
-        )
-        try:
-            if query:
-                await query.edit_message_text(reject_text, parse_mode="HTML")
-            else:
-                await context.bot.edit_message_text(
-                    chat_id=chat_id, message_id=prop_data["message_id"],
-                    text=reject_text, parse_mode="HTML"
-                )
-        except Exception as e:
-            logger.warning(f"更新否決訊息失敗: {e}")
-
-        source_title = known_groups.get(chat_id, {}).get("title", str(chat_id))
-        await report_to_admin_group(
-            context.bot, source_title, chat_id,
-            prop_data["topic"], prop_data["initiator_name"], prop_data["anonymous"],
-            yes_count, no_count, passed=False,
-            reason="反對票數超過同意票數 5 票以上"
-        )
-        return
-
-    # ── 通過：同意票達 10 票 ──
-    if yes_count >= PROPOSAL_TARGET:
-        task = prop.get("timeout_task")
-        if task and not task.done():
-            task.cancel()
-        prop_data = active_proposals.pop(chat_id, None)
-
-        pass_text = (
-            f"🗳️ <b>提案結束</b>\n"
-            f"📌 <b>提案：</b>{prop_data['topic']}\n"
-            f"✅ <b>結果：通過</b>（達到 {PROPOSAL_TARGET} 票同意）\n"
-            f"✅ 同意 {yes_count} 票　❌ 反對 {no_count} 票"
-        )
-        try:
-            if query:
-                await query.edit_message_text(pass_text, parse_mode="HTML")
-            else:
-                await context.bot.edit_message_text(
-                    chat_id=chat_id, message_id=prop_data["message_id"],
-                    text=pass_text, parse_mode="HTML"
-                )
-        except Exception as e:
-            logger.warning(f"更新通過訊息失敗: {e}")
-
-        source_title = known_groups.get(chat_id, {}).get("title", str(chat_id))
-        await report_to_admin_group(
-            context.bot, source_title, chat_id,
-            prop_data["topic"], prop_data["initiator_name"], prop_data["anonymous"],
-            yes_count, no_count, passed=True,
-            reason=f"同意票達到 {PROPOSAL_TARGET} 票門檻"
-        )
-        return
-
-    # ── 尚未決定，更新票數顯示 ──
-    text     = build_proposal_text(chat_id)
-    keyboard = build_proposal_keyboard(chat_id)
-    try:
-        if query:
-            await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
-        else:
-            await context.bot.edit_message_text(
-                chat_id=chat_id, message_id=prop["message_id"],
-                text=text, reply_markup=keyboard, parse_mode="HTML"
-            )
-    except Exception as e:
-        logger.warning(f"更新提案訊息失敗: {e}")
-
-
-async def propose_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """處理 /propose <提案內容> 指令"""
-    chat = update.effective_chat
-    user = update.effective_user
-
-    if chat.type == "private":
-        await update.message.reply_text("❌ 此指令僅在群組中可用！")
-        return
-
-    if not feature_enabled(known_groups.get(chat.id, {}), "proposals"):
-        await update.message.reply_text("❌ 此群組已停用自訂提案。")
-        return
-
-    if chat.id in active_proposals:
-        await update.message.reply_text("⚠️ 目前已有進行中的提案，請等待結束後再發起！")
-        return
-
-    # 取得提案內容
-    topic = " ".join(context.args).strip() if context.args else ""
-    if not topic:
-        await update.message.reply_text(
-            "📋 <b>發起自訂提案</b>\n\n"
-            "用法：<code>/propose 你的提案內容</code>\n\n"
-            "例如：\n"
-            "<code>/propose 希望每周五設為自由討論日</code>",
-            parse_mode="HTML"
-        )
-        return
-
-    if len(topic) > 200:
-        await update.message.reply_text("❌ 提案內容過長，請控制在 200 字以內！")
-        return
-
-    # 暫存草稿，等待匿名選擇
-    key = (chat.id, user.id)
-    pending_proposal_setup[key] = {
-        "topic": topic,
-        "chat_id": chat.id,
-        "chat_title": chat.title,
-        "initiator_id": user.id,
-        "initiator_name": user.mention_html(),
-    }
-
-    keyboard = [[
-        InlineKeyboardButton("👤 公開（顯示我的名字）", callback_data=f"propsetup_public_{chat.id}_{user.id}"),
-        InlineKeyboardButton("🕵️ 匿名（隱藏發起人）",   callback_data=f"propsetup_anon_{chat.id}_{user.id}"),
-    ]]
-    await update.message.reply_text(
-        f"📋 <b>提案預覽</b>\n\n"
-        f"<b>內容：</b>{topic}\n\n"
-        f"請選擇是否匿名發起：",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="HTML"
-    )
-
-
-async def on_proposal_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """處理匿名/公開選擇回調"""
-    query = update.callback_query
-    await query.answer()
-
-    parts = query.data.split("_")  # propsetup_public/anon_CHATID_USERID
-    if len(parts) != 4:
-        return
-
-    _, choice, chat_id_str, user_id_str = parts
-    chat_id = int(chat_id_str)
-    user_id = int(user_id_str)
-
-    if query.from_user.id != user_id:
-        await query.answer("這不是你的提案設定按鈕！", show_alert=True)
-        return
-
-    key = (chat_id, user_id)
-    if key not in pending_proposal_setup:
-        await query.edit_message_text("❌ 提案設定已過期，請重新使用 /propose 指令。")
-        return
-
-    draft = pending_proposal_setup.pop(key)
-
-    if chat_id in active_proposals:
-        await query.edit_message_text("⚠️ 其他人剛剛已發起提案，請等待結束後再試！")
-        return
-
-    anonymous = (choice == "anon")
-
-    active_proposals[chat_id] = {
-        "topic":          draft["topic"],
-        "initiator_id":   draft["initiator_id"],
-        "initiator_name": draft["initiator_name"],
-        "anonymous":      anonymous,
-        "yes_votes":      set(),
-        "no_votes":       set(),
-        "started_at":     time.time(),
-        "message_id":     None,
-        "timeout_task":   None,
-    }
-
-    # 刪除設定訊息，改發正式提案
-    try:
-        await query.delete_message()
-    except Exception:
-        pass
-
-    text     = build_proposal_text(chat_id)
-    keyboard = build_proposal_keyboard(chat_id)
-    msg = await context.bot.send_message(
-        chat_id, text, reply_markup=keyboard, parse_mode="HTML"
-    )
-    active_proposals[chat_id]["message_id"] = msg.message_id
-
-    # 啟動逾時計時器
-    active_proposals[chat_id]["timeout_task"] = asyncio.create_task(
-        proposal_timeout_task(context, chat_id)
-    )
-
-    anon_label = "匿名" if anonymous else "公開"
-    logger.info(f"📋 自訂提案發起 [{anon_label}]: 群組 {chat_id}，內容：{draft['topic'][:50]}")
-
-
-async def on_proposal_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """處理提案投票按鈕"""
-    query = update.callback_query
-    await query.answer()
-
-    parts = query.data.split("_")  # prop_yes_CHATID or prop_no_CHATID
-    if len(parts) != 3:
-        return
-
-    _, option, chat_id_str = parts
-    chat_id  = int(chat_id_str)
-    voter_id = query.from_user.id
-
-    if chat_id not in active_proposals:
-        await query.answer("此提案已結束", show_alert=True)
-        return
-
-    prop = active_proposals[chat_id]
-
-    # 發起人不可投票（防止自投）
-    if voter_id == prop["initiator_id"] and not prop["anonymous"]:
-        await query.answer("⚠️ 發起人不可為自己的提案投票！", show_alert=True)
-        return
-
-    # 更換票
-    prop["yes_votes"].discard(voter_id)
-    prop["no_votes"].discard(voter_id)
-
-    if option == "yes":
-        prop["yes_votes"].add(voter_id)
-        await query.answer("✅ 已投同意票")
-    else:
-        prop["no_votes"].add(voter_id)
-        await query.answer("❌ 已投反對票")
-
-    await check_proposal_state(context, chat_id, query)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3069,6 +2724,27 @@ def main():
     
     # 創建應用
     application = Application.builder().token(bot_token).build()
+
+    # 有完整環境變數時啟用 Web 數字圖片 + Turnstile；未配置則保留 Telegram 驗證碼回退。
+    global web_verification_server
+    if web_verification_configured():
+        loop = asyncio.get_event_loop()
+
+        async def _web_success(token: str, user_id: int):
+            await complete_web_verification(application.bot, token, user_id)
+
+        try:
+            web_verification_server = WebVerificationServer(loop, _web_success)
+            web_verification_server.start()
+            logger.info("🌐 Web 驗證服務已啟動：%s", web_verification_server.base_url)
+        except Exception as exc:
+            web_verification_server = None
+            logger.exception("Web 驗證服務啟動失敗，回退 Telegram 驗證碼：%s", exc)
+    else:
+        logger.warning(
+            "未配置 WEB_VERIFY_BASE_URL/CF_TURNSTILE_SITE_KEY/CF_TURNSTILE_SECRET_KEY，"
+            "使用 Telegram 圖片驗證碼回退流程"
+        )
     
     # 註冊處理器
     application.add_handler(CommandHandler("start", start))
