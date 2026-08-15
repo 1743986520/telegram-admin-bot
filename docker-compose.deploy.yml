@@ -17,22 +17,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
-
-  telegram-admin-bot-proxy:
-    image: caddy:2-alpine
-    container_name: telegram-admin-bot-proxy
-    restart: unless-stopped
-    depends_on:
-      telegram-admin-bot:
-        condition: service_healthy
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-
-volumes:
-  caddy_data:
-  caddy_config:

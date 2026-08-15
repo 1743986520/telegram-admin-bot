@@ -1,3 +1,0 @@
-verify.di0.uk {
-    reverse_proxy telegram-admin-bot:8080
-}
