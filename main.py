@@ -1762,6 +1762,11 @@ async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if update.effective_user.id != OWNER_ID and update.effective_chat and update.effective_chat.type == "private":
         await update.effective_message.reply_text("請在要管理的群組中使用 /panel。")
         return
+    chat = update.effective_chat
+    if chat and chat.type in ("group", "supergroup"):
+        known_groups.setdefault(chat.id, {"title": chat.title or str(chat.id), "status": "active"})
+        known_groups[chat.id]["title"] = chat.title or str(chat.id)
+        save_known_groups()
     await update.effective_message.reply_text(
         "⚙️ 開啟群組管理面板：",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("開啟管理面板", url=web_verification_server.admin_url())]]),
