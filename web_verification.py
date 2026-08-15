@@ -211,7 +211,7 @@ class WebVerificationServer:
                     new_captcha = self._rotate_captcha(token)
                     self._send(HTTPStatus.BAD_REQUEST, "text/html; charset=utf-8", _page(token, server.site_key, new_captcha, server.bot_username, "數字驗證碼錯誤，已換發新的驗證碼。"))
                     return
-                if not _verify_telegram_webapp(self.bot_token, telegram_init_data, session["user_id"]):
+                if not _verify_telegram_webapp(server.bot_token, telegram_init_data, session["user_id"]):
                     new_captcha = self._rotate_captcha(token)
                     self._send(HTTPStatus.BAD_REQUEST, "text/html; charset=utf-8", _page(token, server.site_key, new_captcha, server.bot_username, "Telegram 帳號不符或登入已失效，已換發新的驗證碼。"))
                     return
