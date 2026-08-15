@@ -11,6 +11,7 @@ import html
 import hmac
 import io
 import json
+import logging
 import os
 import secrets
 import threading
@@ -27,6 +28,7 @@ from PIL import Image, ImageDraw, ImageFont
 TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
 SESSION_TTL = 300
 MAX_ATTEMPTS = 5
+logger = logging.getLogger(__name__)
 
 
 def is_configured() -> bool:
@@ -137,6 +139,12 @@ class WebVerificationServer:
                         return None
                     return dict(session)
 
+            def _invalidate(self, token):
+                with server.lock:
+                    session = server.sessions.get(token)
+                    if session:
+                        session["used"] = True
+
             def do_GET(self):
                 path = urllib.parse.urlparse(self.path).path
                 if path == "/healthz":
@@ -172,13 +180,18 @@ class WebVerificationServer:
                 turnstile = form.get("cf-turnstile-response", [""])[0]
                 with server.lock:
                     current = server.sessions.get(token)
+                    if not current or current["used"]:
+                        self._send(HTTPStatus.GONE, "text/html; charset=utf-8", "驗證連結已失效。")
+                        return
                     current["attempts"] += 1
                     attempts = current["attempts"]
                 if attempts > MAX_ATTEMPTS or not hmac.compare_digest(_hash(answer), session["answer"]):
-                    self._send(HTTPStatus.BAD_REQUEST, "text/html; charset=utf-8", _page(token, server.site_key, session["captcha"], "數字驗證碼錯誤，請重新輸入。"))
+                    self._invalidate(token)
+                    self._send(HTTPStatus.BAD_REQUEST, "text/html; charset=utf-8", "驗證失敗，連結已失效，請回 Telegram 重新取得驗證連結。")
                     return
-                if not _verify_turnstile(server.secret_key, turnstile, self.client_address[0]):
-                    self._send(HTTPStatus.BAD_REQUEST, "text/html; charset=utf-8", _page(token, server.site_key, session["captcha"], "Cloudflare 驗證未通過，請重試。"))
+                if not _verify_turnstile(server.secret_key, turnstile):
+                    self._invalidate(token)
+                    self._send(HTTPStatus.BAD_REQUEST, "text/html; charset=utf-8", "Cloudflare 驗證未通過，連結已失效，請回 Telegram 重新取得驗證連結。")
                     return
                 with server.lock:
                     current = server.sessions.get(token)
@@ -209,21 +222,25 @@ class WebVerificationServer:
             self.httpd.server_close()
 
 
-def _verify_turnstile(secret: str, token: str, remote_ip: str) -> bool:
+def _verify_turnstile(secret: str, token: str) -> bool:
     if not secret or not token:
         return False
-    payload = json.dumps({"secret": secret, "response": token, "remoteip": remote_ip}).encode("utf-8")
+    # Behind Cloudflare Tunnel, the socket peer is a proxy address, not the visitor.
+    payload = urllib.parse.urlencode({"secret": secret, "response": token}).encode("utf-8")
     request = urllib.request.Request(
         TURNSTILE_VERIFY_URL,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
         method="POST",
     )
     try:
         with urllib.request.urlopen(request, timeout=8) as response:
             result = json.loads(response.read().decode("utf-8"))
+        if not result.get("success"):
+            logger.warning("Turnstile validation failed: %s", result.get("error-codes", []))
         return bool(result.get("success"))
-    except Exception:
+    except Exception as exc:
+        logger.warning("Turnstile validation request failed: %s", type(exc).__name__)
         return False
 
 
