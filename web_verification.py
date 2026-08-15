@@ -149,6 +149,15 @@ class WebVerificationServer:
                     if session:
                         session["used"] = True
 
+            def _rotate_captcha(self, token):
+                answer = "".join(str(secrets.randbelow(10)) for _ in range(6))
+                with server.lock:
+                    session = server.sessions.get(token)
+                    if session:
+                        session["captcha"] = answer
+                        session["answer"] = _hash(answer)
+                return answer
+
             def do_GET(self):
                 path = urllib.parse.urlparse(self.path).path
                 if path == "/healthz":
@@ -193,17 +202,22 @@ class WebVerificationServer:
                         return
                     current["attempts"] += 1
                     attempts = current["attempts"]
-                if attempts > MAX_ATTEMPTS or not hmac.compare_digest(_hash(answer), session["answer"]):
+                captcha_matches = hmac.compare_digest(_hash(answer), session["answer"])
+                if attempts > MAX_ATTEMPTS:
                     self._invalidate(token)
-                    self._send(HTTPStatus.BAD_REQUEST, "text/html; charset=utf-8", "驗證失敗，連結已失效，請回 Telegram 重新取得驗證連結。")
+                    self._send(HTTPStatus.GONE, "text/html; charset=utf-8", "驗證嘗試次數已用完，請回 Telegram 重新取得驗證連結。")
+                    return
+                if not captcha_matches:
+                    new_captcha = self._rotate_captcha(token)
+                    self._send(HTTPStatus.BAD_REQUEST, "text/html; charset=utf-8", _page(token, server.site_key, new_captcha, server.bot_username, "數字驗證碼錯誤，已換發新的驗證碼。"))
                     return
                 if not _verify_telegram_auth(self.bot_token, telegram_auth, session["user_id"]):
-                    self._invalidate(token)
-                    self._send(HTTPStatus.BAD_REQUEST, "text/html; charset=utf-8", "Telegram 帳號不符或登入已失效，連結已失效，請回 Telegram 重新取得驗證連結。")
+                    new_captcha = self._rotate_captcha(token)
+                    self._send(HTTPStatus.BAD_REQUEST, "text/html; charset=utf-8", _page(token, server.site_key, new_captcha, server.bot_username, "Telegram 帳號不符或登入已失效，已換發新的驗證碼。"))
                     return
                 if not _verify_turnstile(server.secret_key, turnstile):
-                    self._invalidate(token)
-                    self._send(HTTPStatus.BAD_REQUEST, "text/html; charset=utf-8", "Cloudflare 驗證未通過，連結已失效，請回 Telegram 重新取得驗證連結。")
+                    new_captcha = self._rotate_captcha(token)
+                    self._send(HTTPStatus.BAD_REQUEST, "text/html; charset=utf-8", _page(token, server.site_key, new_captcha, server.bot_username, "Cloudflare 驗證未通過，已換發新的驗證碼。"))
                     return
                 with server.lock:
                     current = server.sessions.get(token)
