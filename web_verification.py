@@ -28,6 +28,7 @@ from PIL import Image, ImageDraw, ImageFont
 TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
 SESSION_TTL = 300
 MAX_ATTEMPTS = 5
+TELEGRAM_AUTH_TTL = 86400
 logger = logging.getLogger(__name__)
 
 
@@ -38,6 +39,7 @@ def is_configured() -> bool:
             "WEB_VERIFY_BASE_URL",
             "CF_TURNSTILE_SITE_KEY",
             "CF_TURNSTILE_SECRET_KEY",
+            "TELEGRAM_BOT_USERNAME",
         )
     )
 
@@ -95,6 +97,8 @@ class WebVerificationServer:
         self.base_url = os.getenv("WEB_VERIFY_BASE_URL", "").rstrip("/")
         self.site_key = os.getenv("CF_TURNSTILE_SITE_KEY", "")
         self.secret_key = os.getenv("CF_TURNSTILE_SECRET_KEY", "")
+        self.bot_username = os.getenv("TELEGRAM_BOT_USERNAME", "").lstrip("@")
+        self.bot_token = os.getenv("BOT_TOKEN", "")
         self.sessions = {}
         self.lock = threading.Lock()
         self.httpd = None
@@ -157,7 +161,7 @@ class WebVerificationServer:
                     if not session:
                         self._send(HTTPStatus.GONE, "text/html; charset=utf-8", "驗證連結已失效。")
                         return
-                    body = _page(token, server.site_key, session["captcha"])
+                    body = _page(token, server.site_key, session["captcha"], server.bot_username)
                     self._send(HTTPStatus.OK, "text/html; charset=utf-8", body)
                     return
                 self._send(HTTPStatus.NOT_FOUND, "text/plain; charset=utf-8", "Not found")
@@ -178,6 +182,10 @@ class WebVerificationServer:
                 form = urllib.parse.parse_qs(raw.decode("utf-8", "replace"))
                 answer = form.get("captcha", [""])[0].strip()
                 turnstile = form.get("cf-turnstile-response", [""])[0]
+                telegram_auth = {
+                    key: form.get(key, [""])[0]
+                    for key in ("id", "first_name", "last_name", "username", "photo_url", "auth_date", "hash")
+                }
                 with server.lock:
                     current = server.sessions.get(token)
                     if not current or current["used"]:
@@ -188,6 +196,10 @@ class WebVerificationServer:
                 if attempts > MAX_ATTEMPTS or not hmac.compare_digest(_hash(answer), session["answer"]):
                     self._invalidate(token)
                     self._send(HTTPStatus.BAD_REQUEST, "text/html; charset=utf-8", "驗證失敗，連結已失效，請回 Telegram 重新取得驗證連結。")
+                    return
+                if not _verify_telegram_auth(self.bot_token, telegram_auth, session["user_id"]):
+                    self._invalidate(token)
+                    self._send(HTTPStatus.BAD_REQUEST, "text/html; charset=utf-8", "Telegram 帳號不符或登入已失效，連結已失效，請回 Telegram 重新取得驗證連結。")
                     return
                 if not _verify_turnstile(server.secret_key, turnstile):
                     self._invalidate(token)
@@ -244,9 +256,33 @@ def _verify_turnstile(secret: str, token: str) -> bool:
         return False
 
 
-def _page(token: str, site_key: str, captcha: str, error: str = "") -> str:
+def _verify_telegram_auth(bot_token: str, auth: dict, expected_user_id: int) -> bool:
+    """Verify Telegram Login Widget data and bind it to the challenged user."""
+    if not bot_token or not auth.get("id") or not auth.get("hash"):
+        return False
+    try:
+        if int(auth["id"]) != int(expected_user_id):
+            return False
+        if abs(time.time() - int(auth.get("auth_date", "0"))) > TELEGRAM_AUTH_TTL:
+            return False
+    except (TypeError, ValueError):
+        return False
+    received_hash = auth["hash"]
+    fields = {
+        key: value
+        for key, value in auth.items()
+        if key != "hash" and value != ""
+    }
+    data_check_string = "\n".join(f"{key}={fields[key]}" for key in sorted(fields))
+    secret_key = hashlib.sha256(bot_token.encode("utf-8")).digest()
+    expected_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected_hash, received_hash)
+
+
+def _page(token: str, site_key: str, captcha: str, bot_username: str, error: str = "") -> str:
     safe_token = html.escape(token, quote=True)
     safe_key = html.escape(site_key, quote=True)
     safe_captcha = html.escape(captcha)
     safe_error = f'<p class="error">{html.escape(error)}</p>' if error else ""
-    return f"""<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Telegram 入群驗證</title><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script><style>body{{font-family:system-ui,sans-serif;background:#101827;color:#eef4ff;display:grid;place-items:center;min-height:100vh;margin:0}}main{{width:min(420px,calc(100% - 32px));background:#17243a;padding:28px;border-radius:16px;box-shadow:0 12px 40px #0005}}h1{{font-size:22px}}img{{display:block;width:240px;height:88px;margin:20px auto;border-radius:8px}}input{{width:100%;box-sizing:border-box;padding:12px;border:1px solid #58708f;border-radius:8px;background:#0e1726;color:white;font-size:18px;letter-spacing:6px;text-align:center}}button{{width:100%;margin-top:16px;padding:12px;border:0;border-radius:8px;background:#4fa3ff;color:#07111f;font-weight:700;font-size:16px}}.error{{color:#ff9a9a}}.cf{{margin-top:16px}}</style></head><body><main><h1>Telegram 入群驗證</h1><p>請輸入圖片中的 6 位數字，並完成 Cloudflare 驗證。</p>{safe_error}<img src="data:image/png;base64,{__import__('base64').b64encode(_captcha_image(captcha)).decode()}" alt="數字驗證碼"><form method="post"><input name="captcha" inputmode="numeric" pattern="[0-9]{{6}}" maxlength="6" autocomplete="off" required><div class="cf"><div class="cf-turnstile" data-sitekey="{safe_key}"></div></div><button type="submit">完成驗證</button></form></main></body></html>"""
+    safe_bot_username = html.escape(bot_username, quote=True)
+    return f"""<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Telegram 入群驗證</title><script src="https://telegram.org/js/telegram-widget.js?22" async></script><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script><style>body{{font-family:system-ui,sans-serif;background:#101827;color:#eef4ff;display:grid;place-items:center;min-height:100vh;margin:0}}main{{width:min(420px,calc(100% - 32px));background:#17243a;padding:28px;border-radius:16px;box-shadow:0 12px 40px #0005}}h1{{font-size:22px}}img{{display:block;width:240px;height:88px;margin:20px auto;border-radius:8px}}input{{width:100%;box-sizing:border-box;padding:12px;border:1px solid #58708f;border-radius:8px;background:#0e1726;color:white;font-size:18px;letter-spacing:6px;text-align:center}}button{{width:100%;margin-top:16px;padding:12px;border:0;border-radius:8px;background:#4fa3ff;color:#07111f;font-weight:700;font-size:16px}}.error{{color:#ff9a9a}}.cf{{margin-top:16px}}.login{{margin:16px 0}}#login-status{{color:#a9bdd8}}</style></head><body><main><h1>Telegram 入群驗證</h1><p>請先登入「本次被限制的 Telegram 帳號」，再完成圖片與 Cloudflare 驗證。</p>{safe_error}<div class="login"><div id="telegram-login"><script async src="https://telegram.org/js/telegram-widget.js?22" data-telegram-login="{safe_bot_username}" data-size="large" data-userpic="false" data-request-access="write" data-onauth="onTelegramAuth(user)"></script></div><p id="login-status">尚未綁定 Telegram 帳號</p></div><img src="data:image/png;base64,{__import__('base64').b64encode(_captcha_image(captcha)).decode()}" alt="數字驗證碼"><form method="post"><input type="hidden" name="id"><input type="hidden" name="first_name"><input type="hidden" name="last_name"><input type="hidden" name="username"><input type="hidden" name="photo_url"><input type="hidden" name="auth_date"><input type="hidden" name="hash"><input name="captcha" inputmode="numeric" pattern="[0-9]{{6}}" maxlength="6" autocomplete="off" required><div class="cf"><div class="cf-turnstile" data-sitekey="{safe_key}"></div></div><button type="submit">完成驗證</button></form><script>function onTelegramAuth(user){{for(const key of ['id','first_name','last_name','username','photo_url','auth_date','hash']){{const input=document.querySelector('input[name="'+key+'"]');if(input)input.value=user[key]||'';}}document.getElementById('login-status').textContent='已綁定 Telegram 帳號：'+(user.username?'@'+user.username:user.id);}}</script></main></body></html>"""
