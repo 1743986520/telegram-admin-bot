@@ -341,7 +341,7 @@ def _telegram_webapp_user_id(bot_token: str, init_data: str) -> Optional[int]:
 
 
 def _miniapp_page() -> str:
-    return """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Telegram</title></head><body><p>正在開啟…</p><script src="https://telegram.org/js/telegram-web-app.js"></script><script>if(window.Telegram&&Telegram.WebApp){Telegram.WebApp.ready();const param=Telegram.WebApp.initDataUnsafe&&Telegram.WebApp.initDataUnsafe.start_param;if(param==='admin'){location.replace('/admin');}else if(param){location.replace('/verify/'+encodeURIComponent(param));}else{document.body.innerHTML='<p>無效的連結，請重新取得。</p>';}}else{document.body.innerHTML='<p>請從 Telegram 內開啟。</p>';}</script></body></html>"""
+    return """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Telegram</title></head><body><p>正在開啟…</p><script src="https://telegram.org/js/telegram-web-app.js"></script><script>if(window.Telegram&&Telegram.WebApp){Telegram.WebApp.ready();const param=Telegram.WebApp.initDataUnsafe&&Telegram.WebApp.initDataUnsafe.start_param;if(param&&param!=='admin'){location.replace('/verify/'+encodeURIComponent(param));}else{location.replace('/admin');}}else{document.body.innerHTML='<p>請從 Telegram 內開啟。</p>';}</script></body></html>"""
 
 
 def _admin_page() -> str:
