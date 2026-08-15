@@ -22,7 +22,7 @@
 
 - 新成員加入時可檢查 **用戶名、暱稱、簡介**。
 - 帳號畫像直接命中廣告模板時，可視為高置信度廣告帳號並直接限制權限。
-- 只有軟性可疑訊號時，可要求完成 **圖片算術驗證碼**。
+- 只有軟性可疑訊號時，可要求完成 **網頁 6 位數圖片驗證碼 + Cloudflare Turnstile**；若未配置 Web 驗證環境變數，會安全回退到 Telegram 圖片算術驗證碼。
 - 驗證碼提供 4 個答案、最多 3 次機會，並有自動過期與訊息清理機制。
 - 已加入成員若修改名稱，`rename_recheck` 可重新檢查帳號畫像。
 - `profile_hit_report` 可獨立控制簡介命中的通報行為。
@@ -225,6 +225,20 @@ chmod +x install.sh
 export BOT_TOKEN="你的 Bot Token"
 python main.py
 ```
+
+### 網頁驗證與 Cloudflare Turnstile
+
+要啟用網頁驗證，需讓 Bot 所在服務公開一個 HTTPS 網址，並設定：
+
+```bash
+export WEB_VERIFY_BASE_URL="https://bot.example.com"
+export WEB_VERIFY_PORT="8080"
+export CF_TURNSTILE_SITE_KEY="你的 Site Key"
+export CF_TURNSTILE_SECRET_KEY="你的 Secret Key"
+python main.py
+```
+
+`CF_TURNSTILE_SECRET_KEY` 只放在部署平台的 Secret/環境變數，不能提交到 Git。網頁驗證連結為一次性、5 分鐘有效；後端會同時檢查圖片數字答案與 Turnstile token，成功後才解除 Telegram 禁言。部署平台需要把 `WEB_VERIFY_PORT` 對外轉發到 HTTPS 網域；若任一必要變數缺少，Bot 會回退到 Telegram 內建圖片驗證流程。
 
 若使用虛擬環境：
 
