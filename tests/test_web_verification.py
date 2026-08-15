@@ -10,15 +10,16 @@ class WebVerificationTests(unittest.TestCase):
 
     def test_session_url_contains_opaque_token(self):
         old = {name: os.environ.get(name) for name in (
-            "WEB_VERIFY_BASE_URL", "CF_TURNSTILE_SITE_KEY", "CF_TURNSTILE_SECRET_KEY"
+            "WEB_VERIFY_BASE_URL", "CF_TURNSTILE_SITE_KEY", "CF_TURNSTILE_SECRET_KEY", "TELEGRAM_BOT_USERNAME"
         )}
         try:
             os.environ["WEB_VERIFY_BASE_URL"] = "https://example.test"
             os.environ["CF_TURNSTILE_SITE_KEY"] = "site"
             os.environ["CF_TURNSTILE_SECRET_KEY"] = "secret"
+            os.environ["TELEGRAM_BOT_USERNAME"] = "example_bot"
             server = WebVerificationServer(None, None)
             token = server.create_session(123, -100)
-            self.assertIn("https://example.test/verify/", server.url(token))
+            self.assertIn("https://t.me/example_bot?startapp=", server.url(token))
             self.assertGreaterEqual(len(token), 32)
             self.assertEqual(server.sessions[token]["user_id"], 123)
         finally:
