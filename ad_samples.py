@@ -13,8 +13,10 @@ from typing import List
 from ad_templates import AD_TEMPLATES
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
-AD_SAMPLES_FILE = os.path.join(_DIR, "custom_ad_samples.json")
-WHITELIST_FILE = os.path.join(_DIR, "whitelist_samples.json")
+_DATA_DIR = os.getenv("BOT_DATA_DIR", os.path.join(_DIR, "runtime"))
+os.makedirs(_DATA_DIR, exist_ok=True)
+AD_SAMPLES_FILE = os.path.join(_DATA_DIR, "custom_ad_samples.json")
+WHITELIST_FILE = os.path.join(_DATA_DIR, "whitelist_samples.json")
 
 _lock = threading.Lock()
 

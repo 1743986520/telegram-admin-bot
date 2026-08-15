@@ -60,6 +60,7 @@ ADMIN_GROUP_LINK = "https://t.me/diacg_administration"
 # 數據存儲
 known_groups: Dict[int, Dict] = {}
 application_bot = None
+DATA_DIR = os.getenv("BOT_DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "runtime"))
 pending_verifications: Dict[int, Dict] = {}
 web_verification_server: Optional[WebVerificationServer] = None
 # 用戶最後一次看到的 (username, 暱稱)，用來偵測改名／改用戶名，改名時重新跑一次帳號畫像檢測
@@ -145,7 +146,8 @@ def create_simple_unmute_permissions():
 def save_known_groups():
     """保存群組數據到文件"""
     try:
-        with open("known_groups.json", "w", encoding='utf-8') as f:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(os.path.join(DATA_DIR, "known_groups.json"), "w", encoding='utf-8') as f:
             import json
             json.dump(known_groups, f, ensure_ascii=False, indent=2)
     except Exception as e:
@@ -155,7 +157,11 @@ def load_known_groups():
     """從文件加載群組數據"""
     global known_groups
     try:
-        with open("known_groups.json", "r", encoding='utf-8') as f:
+        data_path = os.path.join(DATA_DIR, "known_groups.json")
+        legacy_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "known_groups.json")
+        if not os.path.exists(data_path) and os.path.exists(legacy_path):
+            data_path = legacy_path
+        with open(data_path, "r", encoding='utf-8') as f:
             import json
             known_groups = json.load(f)
             known_groups = {int(k): v for k, v in known_groups.items()}
