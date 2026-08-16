@@ -300,12 +300,14 @@ async def _delete_after(message, seconds: int):
         pass
 
 
-async def _expire_verification(bot, user_id: int, delay: float = 1800):
+async def _expire_verification(bot, user_id: int, delay: float = 1800, created_at: float = None):
     """驗證逾時（預設30分鐘）後，若還沒完成就自動清掉當下那則訊息與狀態，
     避免「開始真人驗證」按鈕或題目一直卡在群裡沒人管。"""
     await asyncio.sleep(delay)
     info = pending_verifications.get(user_id)
     if not info:
+        return
+    if created_at is not None and info.get("timestamp") != created_at:
         return
     del pending_verifications[user_id]
     msg_ref = info.get("message_ref")
@@ -709,7 +711,13 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         "chat_id": sent.chat_id,
                         "message_id": sent.message_id,
                     }
-                    asyncio.create_task(_expire_verification(context.bot, user.id, 1800))
+                    cleanup_delay = 300 if web_verification_server else 1800
+                    asyncio.create_task(_expire_verification(
+                        context.bot,
+                        user.id,
+                        cleanup_delay,
+                        pending_verifications[user.id]["timestamp"],
+                    ))
 
                 except Exception as e:
                     logger.error(f"禁言失敗: {e}")
